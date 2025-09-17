@@ -1,0 +1,47 @@
+[build-system]
+# XXX: If your project needs other packages to build properly, add them to this list.
+requires = ["setuptools >= 64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "riflow"
+version = "0.0.1"
+license = {file = "LICENSE"}
+readme = "README.md"
+# dynamic = ["version", "readme"]
+authors = [
+  {name = "Chris Finlay", email = "christopher.finlay@epfl.ch"},
+]
+maintainers = [
+  {name = "Chris Finlay", email = "christopher.finlay@epfl.ch"}
+]
+description = "Radio Interferometric data reduction workflows (RI-flow)."
+
+requires-python = ">=3.9,<3.13"
+dependencies = [
+    "dask<=2024.10.0", "xarray", "zarr<3.0.0", 
+    "dask-ms>=0.2.21", "scipy", "tqdm", "matplotlib", 
+    "astropy", "numpy<2.0.0", 
+]
+
+[project.optional-dependencies]
+sat = ["regions"]
+test = ["pytest"]
+docs = ["sphinx", "sphinx-rtd-theme"]
+
+[project.urls]
+Repository = "https://github.com/chrisfinlay/ri-flow.git"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+tabsim = ["data/**/*"]
+
+[project.scripts]
+extract = "riflow.scripts.run_extraction:main"
+flag-data = "riflow.flagging.flag_data:main"
+# ast-region = "tabsim.scripts.ast_region:main"

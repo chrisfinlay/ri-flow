@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 from daskms import xds_from_ms, xds_to_table
 
 import xarray as xr
@@ -10,6 +8,8 @@ import os
 import argparse
 import subprocess
 import shutil
+
+from typing import Optional
 
 # aoflagger -strategy ../yaml_configs/target/firstpass.rfis tab1_obs_16A_450T-0440-1338_256I_001F-1.227e+09-1.227e+09_100PAST_000GAST_000EAST_1SAT_0GRD_1.0e+00RFI/tab1_obs_16A_450T-0440-1338_256I_001F-1.227e+09-1.227e+09_100PAST_000GAST_000EAST_1SAT_0GRD_1.0e+00RFI.ms/
 
@@ -64,8 +64,8 @@ def write_aoflags_to_flag(ms_path: str):
 def run_aoflagger(
     ms_path: str,
     data_column: str = "CAL_DATA",
-    strategy_paths: list = None,
-    sif_path: str = None,
+    strategy_paths: Optional[list] = None,
+    sif_path: Optional[str] = None,
     bash_exec: str = "/bin/bash",
     rerun_aoflagger: bool = False,
 ):
@@ -83,6 +83,8 @@ def run_aoflagger(
             print("Using previous AOFlagger run.")
         except:
             aoflags = None
+    else:
+        aoflags = None
 
     if not aoflags or rerun_aoflagger:
 
