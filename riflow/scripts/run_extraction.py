@@ -50,12 +50,20 @@ def main():
     )
     parser.add_argument("-isx", "--im_suffix", default=None, help="Image name suffix.")
     parser.add_argument("-tsx", "--tab_suffix", default=None, help="Image name suffix.")
+    parser.add_argument(
+        "-r",
+        "--recopy",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Recopy data from tab zarr files to MS file before imaging.",
+    )
     args = parser.parse_args()
     bash = args.bash_exec
     sim_dir = args.sim_dir
     sif_path = args.sif_path
     im_suffix = args.im_suffix
     tab_suffix = args.tab_suffix
+    recopy = args.recopy
 
     im_suffix, tab_suffix = [
         "_" + suffix if suffix else "" for suffix in [im_suffix, tab_suffix]
@@ -132,7 +140,7 @@ def main():
                 thresh = config[key]["flag"]["thresh"]
                 write_perfect_flags(ms_path, thresh)
                 # if key == "tab":
-                if "tab" in key:
+                if "tab" in key and recopy:
                     name = f"{thresh:.1f}sigma{im_suffix}{tab_suffix}"
                     subprocess.run(
                         f"tab2MS -m {ms_path} -z {tab_path} -d {config['data']['data_col']}",
