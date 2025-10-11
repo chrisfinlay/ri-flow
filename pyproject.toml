@@ -17,11 +17,10 @@ maintainers = [
 ]
 description = "Radio Interferometric data reduction workflows (RI-flow)."
 
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.9"
 dependencies = [
-    "dask<=2024.10.0", "xarray", "zarr<3.0.0", 
-    "dask-ms>=0.2.21", "scipy", "tqdm", "matplotlib", 
-    "astropy", "numpy<2.0.0", 
+    "dask-ms", "xarray", "zarr<3.0.0", 
+    "tqdm", "matplotlib", "astropy", "numpy"
 ]
 
 [project.optional-dependencies]
