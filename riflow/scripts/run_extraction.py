@@ -25,6 +25,12 @@ def main():
         "-s", "--sim_dir", help="Path to the directory of the simulation."
     )
     parser.add_argument(
+        "-t",
+        "--tab_data",
+        default="map",
+        help="Type of tabascal data to copy over. Default is map. Options are {'map', 'init'}",
+    )
+    parser.add_argument(
         "-d",
         "--data",
         default="perfect,ideal,tab,flag1,flag2",
@@ -72,7 +78,9 @@ def main():
     # model_name = "fixed_orbit_rfi_full_fft_standard_padded_model"
     # model_name = "kepler_orbit_fft_padded_model"
     model_name = "Custom"
-    tab_path = os.path.join(sim_dir, f"results/map_pred_{model_name}{tab_suffix}.zarr")
+    tab_path = os.path.join(
+        sim_dir, f"results/{args.tab_data}_pred_{model_name}{tab_suffix}.zarr"
+    )
 
     run_id = datetime.now().strftime("%m-%d-%YT%H:%M:%S")
 
