@@ -44,4 +44,5 @@ tabsim = ["data/**/*"]
 extract = "riflow.scripts.run_extraction:main"
 flag-data = "riflow.flagging.flag_data:main"
 image = "riflow.imaging.wsclean_image:main"
+mk-gif = "riflow.scripts.make_gif:main"
 # ast-region = "tabsim.scripts.ast_region:main"

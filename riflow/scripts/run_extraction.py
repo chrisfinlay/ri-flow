@@ -95,7 +95,7 @@ def main():
         sim_dir = os.path.abspath(sim_dir)
         config["data"]["sim_dir"] = sim_dir
     elif config["data"]["sim_dir"] is not None:
-        sim_dir = os.path.abs(config["data"]["sim_dir"])
+        sim_dir = os.path.abspath(config["data"]["sim_dir"])
         config["data"]["sim_dir"] = sim_dir
     else:
         raise KeyError(

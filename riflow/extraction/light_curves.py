@@ -1,0 +1,265 @@
+import numpy as np
+from numpy.typing import NDArray
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+
+from astropy.io import fits
+from astropy.coordinates import SkyCoord
+from astropy.wcs import WCS, FITSFixedWarning
+from astropy.wcs.utils import proj_plane_pixel_scales
+
+from riflow.io.ms import read_times
+from riflow.io.fits import get_centre_radec
+from riflow.coords import get_fornax_radec, get_sat_radec_from_ms
+
+from typing import Callable, Union, Optional
+
+import warnings
+
+warnings.filterwarnings("ignore", category=FITSFixedWarning)
+
+
+def extract_light_curve(fits_files, ra, dec, aperture_radius_deg=1.0):
+    """
+    Extract light curve from FITS images using manual circular aperture photometry.
+
+    Parameters:
+    -----------
+    fits_files: list[str]
+        List of FITS files at each time step.
+    ra/dec: NDArray
+        RA and Dec in degrees at each time step.
+    aperture_radius_deg: float
+        aperture radius in degrees.
+
+    Returns:
+    --------
+    light_curve: NDArray
+        Fluxes at each time step.
+    """
+
+    stat_funcs = [np.min, np.mean, np.max]
+
+    n_files = len(fits_files)
+
+    light_curve = np.zeros((n_files, 3))
+
+    for i, fits_file in enumerate(fits_files):
+        with fits.open(fits_file) as hdul:
+            data = hdul[0].data[0, 0]  # type: ignore
+            hdr = hdul[0].header  # type: ignore
+            wcs = WCS(hdr).celestial
+
+            radec = np.array([ra[i], dec[i]])
+
+            light_curve[i] = get_region_stats(  # type: ignore
+                data,
+                wcs,
+                radec,
+                stat_funcs,
+                aperture_radius_deg,
+            )
+
+    return light_curve
+
+
+def get_region_stats(
+    image: NDArray,
+    wcs: WCS,
+    radec: NDArray,
+    stat_funcs: list[Callable] = [np.min, np.mean, np.max],
+    aperture_radius_deg: float = 1.0,
+    draw_circle_with_label: bool = False,
+    label: str = "",
+    label_offset: float = 0,
+) -> Union[NDArray, tuple[NDArray, Circle, dict]]:
+
+    # Get pixel scale (deg/pix) and convert aperture radius
+    pixel_scales = proj_plane_pixel_scales(wcs)[:2]
+    aperture_radius_pix = aperture_radius_deg / np.mean(pixel_scales)
+
+    # Convert RA/Dec to pixel coordinates
+    skycoord = SkyCoord(ra=radec[0], dec=radec[1], unit="deg")
+    x_centre, y_centre = wcs.world_to_pixel(skycoord)
+
+    x, y = np.arange(image.shape[0]), np.arange(image.shape[1])
+    xx, yy = np.meshgrid(x, y)
+
+    idx = np.where(
+        aperture_radius_pix >= np.sqrt((xx - x_centre) ** 2 + (yy - y_centre) ** 2)
+    )
+
+    if len(idx) > 0:
+        stats = np.array([stat(image[idx]) for stat in stat_funcs])
+    else:
+        stats = np.empty(len(stat_funcs))
+
+    if draw_circle_with_label:
+        circ = Circle(
+            (x_centre, y_centre),
+            aperture_radius_pix,
+            edgecolor="red",
+            facecolor="none",
+            linewidth=1.5,
+        )
+        label_kwargs = {
+            "x": x_centre + 1 * aperture_radius_pix + label_offset,
+            "y": y_centre
+            + 1 * aperture_radius_pix
+            + label_offset,  # Offset to avoid overlapping
+            "s": label,  # You can customize this label
+            "color": "red",  # Choose contrasting color
+            "fontsize": 9,
+            "ha": "left",
+            "va": "bottom",  # Horizontal and vertical alignment
+            # "bbox": {
+            # "facecolor": "black", "alpha": 0.5, "pad": 1, "edgecolor": "none"
+            # },
+        }
+        return stats, circ, label_kwargs
+    else:
+        return stats
+
+
+def plot_light_curves(
+    times: np.ndarray, light_curves: np.ndarray, titles: list, save_name: str
+):
+
+    plt.rcParams["font.size"] = 16
+    n_curves = len(titles)
+
+    fig, ax = plt.subplots(n_curves, 1, figsize=(8, 6.5 * n_curves))
+
+    for i in range(n_curves):
+        ax[i].plot(times, light_curves[i], label=["min", "mean", "max"])
+        ax[i].legend()
+        ax[i].set_title(titles[i])
+        ax[i].set_ylabel("Flux [Jy/bm]")
+        ax[i].set_xlabel("Time [s]")
+        ax[i].grid()
+
+    plt.savefig(save_name, dpi=200, format="png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def get_all_radecs(
+    ms_path: str,
+    fits_fps: list[str],
+    spacetrack_path: str,
+    norad_ids: list[int],
+    include_centre: bool = True,
+    include_fornax: bool = True,
+    frame_shift: Optional[float] = None,
+    sat_pass: Optional[float] = None,
+    additonal_locs: Optional[dict] = None,
+) -> tuple[NDArray, NDArray, list[str], int]:
+
+    times_mjd = read_times(ms_path)
+    times = (times_mjd - times_mjd[0]) * (24 * 3600)
+    n_time = len(times_mjd)
+    shift = 0
+
+    assert n_time == len(fits_fps)
+
+    if len(norad_ids) > 0:
+        radec_sats, norad_ids = get_sat_radec_from_ms(
+            ms_path, spacetrack_path, norad_ids
+        )
+        sat_labels = [str(id) for id in norad_ids]
+        all_radecs = [radec_sats]
+        titles = sat_labels.copy()
+
+        if frame_shift:
+            assert -1 < frame_shift < 1, "Frame shift must be between -1 and 1"
+            shift = int(n_time * frame_shift)
+            all_radecs.append(np.roll(radec_sats, shift, axis=-1))
+            titles += [f"{label} Shifted" for label in sat_labels]
+
+        if sat_pass:
+            assert 0 < sat_pass < 1, "Satellite pass must be between 0 and 1"
+            pass_idx = int(n_time * sat_pass)
+            all_radecs.append(
+                radec_sats[:, :, pass_idx, None] * np.ones((1, 2, n_time))
+            )
+            titles += [f"{label} Pass" for label in sat_labels]
+
+    else:
+        all_radecs = []
+        titles = []
+
+    if include_centre:
+        all_radecs.append(get_centre_radec(fits_fps))
+        titles.append("Phase Centre")
+
+    if include_fornax:
+        all_radecs.append(get_fornax_radec(n_time))
+        titles.append("Fornax A")
+
+    if additonal_locs:
+        for label, coord in additonal_locs.items():
+            all_radecs.append(np.array(coord)[None, :, None] * np.ones((1, 2, n_time)))
+            titles += label
+
+    radec = np.concatenate(all_radecs)
+
+    return times, radec, titles, shift
+
+
+def shift_light_curves(light_curves: NDArray, titles: list[str], shift: int) -> NDArray:
+
+    assert len(light_curves) == len(
+        titles
+    ), "Number of light curves and titles do not match."
+
+    for s_idx, title in enumerate(titles):
+        if "shifted" in title.lower():
+            light_curves[s_idx] = np.roll(light_curves[s_idx], shift, axis=-1)
+
+    return light_curves
+
+
+if __name__ == "__main__":
+
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Modify a MS by adding real data.")
+    parser.add_argument(
+        "-st",
+        "--spacetrack_path",
+        required=True,
+        help="Path to space-track login details YAML file.",
+    )
+    parser.add_argument(
+        "-f",
+        "--fits_path",
+        required=True,
+        help="Search path with wildcard.",
+    )
+    parser.add_argument(
+        "-s",
+        "--save_name",
+        required=True,
+        help="Save name for the plot.",
+    )
+    parser.add_argument(
+        "-ms",
+        "--ms_path",
+        required=True,
+        help="MS Path of data used to image.",
+    )
+    parser.add_argument(
+        "-r",
+        "--radius_deg",
+        default=3.0,
+        help="Aperture radius in degees.",
+    )
+    args = parser.parse_args()
+
+    # plot_extracted_light_curves(
+    #     args.uvfits_path,
+    #     args.fits_path,
+    #     args.spacetrack_path,
+    #     args.save_name,
+    #     args.radius_deg,
+    # )

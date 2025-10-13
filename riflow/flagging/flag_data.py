@@ -16,19 +16,19 @@ from typing import Optional
 
 def write_perfect_flags(ms_path: str, n_sigma: float = 3.0):
 
-    xds = xds_from_ms(ms_path)[0]
+    xds = xds_from_ms(ms_path)[0]  # type: ignore
 
     if n_sigma > 0:
-        flags = da.abs(xds.CAL_DATA - xds.AST_MODEL_DATA) > (
-            n_sigma * xds.SIGMA * da.sqrt(2)
+        flags = da.abs(xds.CAL_DATA - xds.AST_MODEL_DATA) > (  # type: ignore
+            n_sigma * xds.SIGMA * da.sqrt(2)  # type: ignore
         )
     else:
-        flags = xr.zeros_like(xds.DATA).astype(bool)
+        flags = xr.zeros_like(xds.DATA).astype(bool)  # type: ignore
 
-    xds = xds.assign(FLAG=flags)
+    xds = xds.assign(FLAG=flags)  # type: ignore
     cols = ["FLAG"]
 
-    dask.compute(xds_to_table([xds], ms_path, cols))
+    dask.compute(xds_to_table([xds], ms_path, cols))  # type: ignore
 
     print()
     print(f"Flag Threshold : {n_sigma: .1f} sigma")
@@ -39,26 +39,26 @@ def write_perfect_flags(ms_path: str, n_sigma: float = 3.0):
 
 def write_to_aoflags(ms_path: str):
 
-    xds_ms = xds_from_ms(ms_path)[0]
+    xds_ms = xds_from_ms(ms_path)[0]  # type: ignore
 
-    xds_ms = xds_ms.assign({"AO_FLAGS": xds_ms["FLAG"]})
+    xds_ms = xds_ms.assign({"AO_FLAGS": xds_ms["FLAG"]})  # type: ignore
     cols = ["AO_FLAGS"]
 
     print("Writing AOFlagger flags to 'AO_FLAGS' column in MS file.")
 
-    dask.compute(xds_to_table([xds_ms], ms_path, cols))
+    dask.compute(xds_to_table([xds_ms], ms_path, cols))  # type: ignore
 
 
 def write_aoflags_to_flag(ms_path: str):
 
-    xds_ms = xds_from_ms(ms_path)[0]
+    xds_ms = xds_from_ms(ms_path)[0]  # type: ignore
 
-    xds_ms = xds_ms.assign(FLAG=xds_ms["AO_FLAGS"])
+    xds_ms = xds_ms.assign(FLAG=xds_ms["AO_FLAGS"])  # type: ignore
     cols = ["FLAG"]
 
     print("Writing AOFlagger flags to 'FLAG' column in MS file.")
 
-    dask.compute(xds_to_table([xds_ms], ms_path, cols))
+    dask.compute(xds_to_table([xds_ms], ms_path, cols))  # type: ignore
 
 
 def run_aoflagger(
@@ -78,7 +78,7 @@ def run_aoflagger(
     if not rerun_aoflagger:
         xds_ms = xds_from_ms(ms_path)
         try:
-            aoflags = xds_ms["AO_FLAGS"]
+            aoflags = xds_ms["AO_FLAGS"]  # type: ignore
             write_aoflags_to_flag(ms_path)
             print("Using previous AOFlagger run.")
         except:
@@ -124,7 +124,7 @@ def run_aoflagger(
         write_to_aoflags(ms_path)
         reflagged = True
 
-    flags = xds_from_ms(ms_path)[0].FLAG.data
+    flags = xds_from_ms(ms_path)[0].FLAG.data  # type: ignore
     print(f"Flag Rate      : {100*flags.mean().compute(): .1f} %")
 
     return flags, reflagged

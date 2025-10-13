@@ -3,6 +3,10 @@
 ##################
 data:
   sim_dir:              # Optional - Simulation directory containing MS file. Can be specified at runtime
+  ms_path:
+  image_path:
+  data_col: DATA
+  freq_chan: 0
 ######################################
 # Flagging and data column parameters
 ######################################
@@ -14,11 +18,46 @@ ideal:                  # Optional - Required if specified at runtime with --dat
 ######################################
 # Flagging and data column parameters
 ######################################
-tab:                    # Optional - Required if specified at runtime with --data flag. Can be anything
-  data_col: TAB_DATA    # Required - Data column to extract from the MS file. 'TAB_DATA' is only available after running tabascal
-  flag: 
-    type: perfect       # Required - Type of flagging to apply. 'perfect' is only available from simulation
-    thresh: 0           # Required - Sigma threshold for flagging based on visibility noise. 0 indicates no flagging
+real:                       # Optional - Required if specified at runtime with --data flag. Can be anything
+  data_col: REAL_DATA       # Required - Data column to extract from the MS file. 'TAB_DATA' is only available after running tabascal
+  flag:
+    type: perfect           # Required - Type of flagging to apply. 'perfect' is only available from simulation
+    thresh: 0               # Required - Sigma threshold for flagging based on visibility noise. 0 indicates no flagging
+model:
+  data_col: MODEL_DATA
+  flag:
+    type: perfect
+    thresh: 0
+corr:
+  data_col: CORRECTED_DATA
+  flag:
+    type: perfect
+    thresh: 0
+tab_rfi:
+  data_col: TAB_RFI_DATA
+  flag:
+    type: perfect
+    thresh: 0
+tab_ast:
+  data_col: TAB_AST_DATA
+  flag:
+    type: perfect
+    thresh: 0
+tab_rfi_res:
+  data_col: TAB_RFI_RES
+  flag:
+    type: perfect
+    thresh: 0
+tab_ast_res:
+  data_col: TAB_AST_RES
+  flag:
+    type: perfect
+    thresh: 0
+tab_res:
+  data_col: TAB_RES_DATA
+  flag:
+    type: perfect
+    thresh: 0
 ######################################
 # Flagging and data column parameters
 ######################################
@@ -59,3 +98,11 @@ extract:                # Required - PYBDSF source extraction parameters. Can on
   beam_cut: 1.0         # Optional - Source location threshold to consider a positive detection. Measured relative to the imaged synthesized beam width
   thresh_isl: 1.5       # Optional - PYBDSF source detection threshold for islands
   thresh_pix: 1.5       # Optional - PYBDSF source detection threshold for pixels
+#######################
+# GIF movie generation
+#######################
+gif:
+  marker_radius_deg: 3.0
+  norad_ids: []
+  spacetrack_path:
+  freq_chan:

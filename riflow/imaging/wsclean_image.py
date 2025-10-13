@@ -2,6 +2,8 @@ import argparse
 import subprocess
 import os
 
+from riflow.config import prepend_suffix
+
 
 def main():
 
@@ -20,10 +22,10 @@ def main():
     )
     parser.add_argument(
         "-n",
-        "--name_suffix",
+        "--im_suffix",
         default=None,
         type=str,
-        help="Image name suffix. Iamge name will be '{--data_col}_{--name_suffix}-image.fits'.",
+        help="Image name suffix. Iamge name will be '{--data_col}_{--im_suffix}-image.fits'.",
     )
     parser.add_argument(
         "-w",
@@ -48,13 +50,8 @@ def main():
     ms_path = os.path.abspath(args.ms_path)
     bash_exec = args.bash_exec
     wsclean_opts = args.wsclean_opts
-    suffix = args.name_suffix
+    im_suffix = prepend_suffix(args.im_suffix)
     sif_path = args.sif_path
-
-    if suffix is not None:
-        suffix = "_" + suffix
-    else:
-        suffix = ""
 
     data_cols = args.data_col.upper().split(",")
 
@@ -83,8 +80,8 @@ def main():
             flag_cmd = f"flag-data --ms_path {ms_path} --n_sigma {n_sigma}"
             subprocess.run(flag_cmd, shell=True, executable=bash_exec)
         else:
-            log_file = os.path.join(img_dir, f"{data_col}{suffix}_log.txt")
-            wsclean_cmd = f"{container_cmd} wsclean {wsclean_opts} -data-column {data_col} -name {data_col}{suffix} /data/{ms_file} &> {log_file}"
+            log_file = os.path.join(img_dir, f"{data_col}{im_suffix}_log.txt")
+            wsclean_cmd = f"{container_cmd} wsclean {wsclean_opts} -data-column {data_col} -name {data_col}{im_suffix} /data/{ms_file} &> {log_file}"
             print(f"\nWSClean log saved to {os.path.join(img_dir, log_file)}")
             subprocess.run(wsclean_cmd, shell=True, executable=bash_exec)
 
