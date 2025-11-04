@@ -90,7 +90,7 @@ def get_region_stats(
         aperture_radius_pix >= np.sqrt((xx - x_centre) ** 2 + (yy - y_centre) ** 2)
     )
 
-    if len(idx) > 0:
+    if len(idx[0]) > 0:
         stats = np.array([stat(image[idx]) for stat in stat_funcs])
     else:
         stats = np.empty(len(stat_funcs))
