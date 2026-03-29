@@ -59,6 +59,12 @@ def main():
         "--freq_chan",
         help="Frequency channel number. Default is None. If None, this is associated with imaging where channels-out was not given. This is equivalent to MFS when channels-out was defined.",
     )
+    parser.add_argument(
+        "--diff",
+        default=False,
+        help="Whether to time difference the images when making GIF.",
+        action=argparse.BooleanOptionalAction,
+    )
     parser.add_argument("-tsx", "--tab_suffix", help="TABASCAL solution suffix.")
     parser.add_argument("-isx", "--im_suffix", help="Image suffix.")
     parser.add_argument("-g", "--gif_suffix", help="Suffix for GIF.")
@@ -69,6 +75,7 @@ def main():
     tab_suffix = prepend_suffix(args.tab_suffix)
     im_suffix = prepend_suffix(args.im_suffix)
     gif_suffix = prepend_suffix(args.gif_suffix)
+    diff_str = "_diff" if args.diff else ""
 
     types = args.data_types.split(",")
 
@@ -85,6 +92,7 @@ def main():
         for channel in config["gif"]["channels"]:
 
             chan_name = f"_chan_{channel[1:-1]}" if channel else ""
+            # chan_name = "_chan_MFS"
 
             assert (
                 data_type in names.keys()
@@ -92,8 +100,9 @@ def main():
 
             # Get sorted list of FITS files
             fits_search = os.path.join(
-                args.image_path,
+                config["data"]["image_path"],
                 f"{names[data_type]}_0.0sigma{tab_suffix}-t*{channel}dirty.fits",
+                # f"{names[data_type]}_0.0sigma{im_suffix}{tab_suffix}-t*-MFS-dirty.fits",
             )
             # thresh = config[data_type]["flag"]["thresh"]
             # name = f"{thresh:.1f}sigma{im_suffix}{tab_suffix}"
@@ -101,7 +110,9 @@ def main():
             if len(fits_fps) == 0:
                 raise IOError(f"No fits files found with search path: {fits_search}")
 
-            gif_name = f"{data_type}{im_suffix}{tab_suffix}{chan_name}{gif_suffix}"
+            gif_name = (
+                f"{data_type}{diff_str}{im_suffix}{tab_suffix}{chan_name}{gif_suffix}"
+            )
             save_name = os.path.join(save_path, gif_name)
 
             times, radec, titles, shift = get_all_radecs(
@@ -109,6 +120,7 @@ def main():
                 fits_fps,
                 config["gif"]["spacetrack_path"],
                 config["gif"]["norad_ids"],
+                # frame_shift=0.5,
             )
 
             light_curves = make_gif(
@@ -117,7 +129,10 @@ def main():
                 radec,
                 titles,
                 config["gif"]["marker_radius_deg"],
+                diff=args.diff,
             )
+            if args.diff:
+                times = times[1:]
             light_curves = shift_light_curves(light_curves, titles, shift)
 
             np.save(

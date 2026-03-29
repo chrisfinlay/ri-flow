@@ -43,7 +43,16 @@ def make_gif(
     labels: list[str],
     aperture_radius_deg: float,
     label_offset: float = 0,
+    diff: bool = False,
 ):
+
+    stat_funcs = [np.min, np.mean, np.max]
+    # stat_funcs = [
+    #     lambda x: np.max(np.abs(x)),
+    #     np.std,
+    #     np.mean,
+    # ]
+
     # List to store image frames
     frames = []
 
@@ -53,6 +62,12 @@ def make_gif(
     for fp in fits_files:
         with fits.open(fp) as hdul:
             data.append(hdul[0].data[0, 0])  # type: ignore
+
+    if diff:
+        data = np.diff(data, axis=0)
+        fits_files = fits_files[1:]
+        radec = radec[:, :, 1:]
+
     vmin, vmax = np.percentile(data, [0.5, 99.5])
 
     n_src, _, n_fits = radec.shape
@@ -73,6 +88,7 @@ def make_gif(
                 data[f_idx],
                 wcs,
                 coord,
+                stat_funcs=stat_funcs,
                 aperture_radius_deg=aperture_radius_deg,
                 draw_circle_with_label=True,
                 label=labels[s_idx],
