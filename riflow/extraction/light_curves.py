@@ -133,6 +133,7 @@ def plot_light_curves(
 
     for i in range(n_curves):
         ax[i].plot(times, light_curves[i], label=["min", "mean", "max"])
+        # ax[i].plot(times, light_curves[i], label=["max-abs", "std", "mean"])
         ax[i].legend()
         ax[i].set_title(titles[i])
         ax[i].set_ylabel("Flux [Jy/bm]")
@@ -160,7 +161,7 @@ def get_all_radecs(
     n_time = len(times_mjd)
     shift = 0
 
-    assert n_time == len(fits_fps)
+    assert n_time == len(fits_fps), f"Number of time steps ({n_time}) does not equal the number of FITS files ({len(fits_fps)})." 
 
     if len(norad_ids) > 0:
         radec_sats, norad_ids = get_sat_radec_from_ms(
@@ -214,7 +215,7 @@ def shift_light_curves(light_curves: NDArray, titles: list[str], shift: int) -> 
 
     for s_idx, title in enumerate(titles):
         if "shifted" in title.lower():
-            light_curves[s_idx] = np.roll(light_curves[s_idx], shift, axis=-1)
+            light_curves[s_idx] = np.roll(light_curves[s_idx], shift, axis=-2)
 
     return light_curves
 
