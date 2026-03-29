@@ -14,6 +14,43 @@ from typing import Optional
 # aoflagger -strategy ../yaml_configs/target/firstpass.rfis tab1_obs_16A_450T-0440-1338_256I_001F-1.227e+09-1.227e+09_100PAST_000GAST_000EAST_1SAT_0GRD_1.0e+00RFI/tab1_obs_16A_450T-0440-1338_256I_001F-1.227e+09-1.227e+09_100PAST_000GAST_000EAST_1SAT_0GRD_1.0e+00RFI.ms/
 
 
+def flag_zeros(ms_path: str, data_col: str):
+
+    xds = xds_from_ms(ms_path)[0]  # type: ignore
+
+    flags = xds[data_col] == 0.0  # type: ignore
+
+    xds = xds.assign(FLAG=flags)  # type: ignore
+    cols = ["FLAG"]
+
+    dask.compute(xds_to_table([xds], ms_path, cols))  # type: ignore
+
+    print()
+    print(f"Flag Rate      : {100*flags.data.mean().compute(): .1f} %")
+
+    return flags
+
+
+def flag_ants(ms_path: str, bad_ants):
+
+    xds = xds_from_ms(ms_path)[0]  # type: ignore
+
+    a1 = xds["ANTENNA1"].data  # type: ignore
+    a2 = xds["ANTENNA2"].data  # type: ignore
+
+    flags = da.isin(a1, bad_ants) | da.isin(a2, bad_ants)  # type: ignore
+
+    xds = xds.assign(FLAG=flags)  # type: ignore
+    cols = ["FLAG"]
+
+    dask.compute(xds_to_table([xds], ms_path, cols))  # type: ignore
+
+    print()
+    print(f"Flag Rate      : {100*flags.data.mean().compute(): .1f} %")
+
+    return flags
+
+
 def write_perfect_flags(ms_path: str, n_sigma: float = 3.0):
 
     xds = xds_from_ms(ms_path)[0]  # type: ignore
@@ -177,6 +214,13 @@ def main():
         default=None,
         help="Paths to AOFlagger singularity image.",
     )
+    parser.add_argument(
+        "-z",
+        "--zeros",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Whether to flag where visibilities are zeros. Default is False.",
+    )
     args = parser.parse_args()
     ms_path = args.ms_path
     n_sigma = args.n_sigma
@@ -189,6 +233,8 @@ def main():
         flags = run_aoflagger(
             ms_path, data_col, strategy_paths, args.sif_path, args.rerun_aoflagger
         )
+    elif args.zeros:
+        flags = flag_zeros(ms_path, data_col)
     else:
         flags = write_perfect_flags(ms_path, n_sigma)
 
