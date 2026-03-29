@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime
 
 # from riflow.extraction.source_extraction import extract
-from riflow.flagging.flag_data import write_perfect_flags, run_aoflagger
+from riflow.flagging.flag_data import write_perfect_flags, run_aoflagger, flag_zeros
 from riflow import Tee, load_config
 
 
@@ -39,8 +39,8 @@ def main():
     parser.add_argument(
         "-p",
         "--processes",
-        default="image,extract",
-        help="The types of processing to do. {'image', 'extract', 'pow_spec'}",
+        default="image",
+        help="The types of processing to do. Default is 'image'. Options are {'image', 'extract', 'pow_spec'}",
     )
     parser.add_argument(
         "-b",
@@ -75,21 +75,15 @@ def main():
         "_" + suffix if suffix else "" for suffix in [im_suffix, tab_suffix]
     ]
 
-    # model_name = "fixed_orbit_rfi_full_fft_standard_padded_model"
-    # model_name = "kepler_orbit_fft_padded_model"
-    model_name = "Custom"
-    tab_path = os.path.join(
-        sim_dir, f"results/{args.tab_data}_pred_{model_name}{tab_suffix}.zarr"
-    )
-
     run_id = datetime.now().strftime("%m-%d-%YT%H:%M:%S")
 
-    log_path = f"log_extract_{run_id}.txt"
+    log_path = f"log_extract_{im_suffix}{tab_suffix}{run_id}.txt"
     log = open(log_path, "w")
     backup = sys.stdout
     sys.stdout = Tee(sys.stdout, log)
 
     config = load_config(args.config_path)
+    model_name = "Custom"
 
     if sim_dir is not None:
         sim_dir = os.path.abspath(sim_dir)
@@ -101,6 +95,10 @@ def main():
         raise KeyError(
             "'sim_dir' must be specified in either the config file or as a command line argument."
         )
+
+    tab_path = os.path.join(
+        sim_dir, f"results/{args.tab_data}_pred_{model_name}{tab_suffix}.zarr"
+    )
 
     if sif_path is not None:
         sif_path = os.path.abspath(sif_path)
@@ -144,20 +142,26 @@ def main():
             print()
             print(f"Flagging {data_col} column of the MS file.")
 
-            if flag_type == "perfect":
+            if flag_type in ["perfect", "zeros", None]:
                 thresh = config[key]["flag"]["thresh"]
-                write_perfect_flags(ms_path, thresh)
-                # if key == "tab":
+                name = f"{thresh:.1f}sigma{im_suffix}{tab_suffix}"
+                if flag_type == "perfect":
+                    write_perfect_flags(ms_path, thresh)
+                elif flag_type == "zeros":
+                    flag_zeros(ms_path, config["data"]["data_col"])
+                else:
+                    print("No flagging done.")
+
                 if "tab" in key and recopy:
-                    name = f"{thresh:.1f}sigma{im_suffix}{tab_suffix}"
+
                     subprocess.run(
                         f"tab2MS -m {ms_path} -z {tab_path} -d {config['data']['data_col']}",
                         shell=True,
                         executable="/bin/bash",
                     )
                     # write_results(ms_path, tab_path, config["data"]["data_col"])
-                else:
-                    name = f"{thresh:.1f}sigma{im_suffix}"
+                # else:
+                #     name = f"{thresh:.1f}sigma{im_suffix}"
 
                 reflagged = True
 
