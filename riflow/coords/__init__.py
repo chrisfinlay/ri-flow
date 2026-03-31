@@ -3,8 +3,7 @@ from numpy.typing import NDArray
 from astropy.coordinates import EarthLocation
 from skyfield.api import EarthSatellite, wgs84, load
 
-from tabsim.config import yaml_load
-from tabsim.tle import get_tles_by_id
+from tabsim.tle import get_tles_by_id, load_spacetrack_credentials
 from tabsim.jax.coordinates import mjd_to_jd
 
 from riflow.io.ms import read_ants_itrf, read_times
@@ -36,11 +35,13 @@ def get_tles(
     spacetrack_path: str, norad_ids: list[int], epoch_mjd: float
 ) -> tuple[NDArray, list[int]]:
 
-    st_login = yaml_load(spacetrack_path)
+    user, passwd = load_spacetrack_credentials()
 
     tles_df = get_tles_by_id(
-        st_login["username"],
-        st_login["password"],
+        user,
+        passwd,
+        # st_login["username"],
+        # st_login["password"],
         norad_ids,
         mjd_to_jd(epoch_mjd),
         # tle_dir="./tles",
