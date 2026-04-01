@@ -19,7 +19,7 @@ description = "Radio Interferometric data reduction workflows (RI-flow)."
 
 requires-python = ">=3.9"
 dependencies = [
-    "dask-ms", "xarray", "zarr<3.0.0", 
+    "jax-finufft", "tabsim", "dask-ms", "xarray", "zarr<3.0.0", 
     "tqdm", "matplotlib", "astropy", "numpy"
 ]
 
@@ -45,4 +45,5 @@ extract = "riflow.scripts.run_extraction:main"
 flag-data = "riflow.flagging.flag_data:main"
 image = "riflow.imaging.wsclean_image:main"
 mk-gif = "riflow.scripts.make_gif:main"
+nufft-gif = "riflow.scripts.nufft_gif:main"
 # ast-region = "tabsim.scripts.ast_region:main"
