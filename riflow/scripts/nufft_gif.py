@@ -172,17 +172,25 @@ def _dirty_image(
 
 
 def _aperture_pixel_coords(
-    wcs: WCS, radec_all: np.ndarray, aperture_radius_deg: float, n_pix: int
+    wcs_or_list: "WCS | list[WCS]",
+    radec_all: np.ndarray,
+    aperture_radius_deg: float,
+    n_pix: int,
 ) -> tuple[list[np.ndarray], np.ndarray]:
     """
     Pre-compute per-frame aperture pixel masks for all sources.
+
+    wcs_or_list may be a single WCS (shared across all frames) or a list of
+    per-frame WCS objects (one per time step, for multi-scan MSes where each
+    integration has its own phase centre).
 
     Returns
     -------
     masks : list[ndarray]  shape (n_sources, n_times) of (n_pix_in_mask,) index arrays
     pix_xy : ndarray  shape (n_sources, n_times, 2)  — (x_centre, y_centre) per frame
     """
-    pixel_scales = proj_plane_pixel_scales(wcs)[:2]
+    wcs0 = wcs_or_list[0] if isinstance(wcs_or_list, list) else wcs_or_list
+    pixel_scales = proj_plane_pixel_scales(wcs0)[:2]
     aperture_radius_pix = aperture_radius_deg / np.mean(pixel_scales)
 
     n_sources, _, n_times = radec_all.shape
@@ -193,8 +201,9 @@ def _aperture_pixel_coords(
 
     for s in range(n_sources):
         for t in range(n_times):
+            wcs_t = wcs_or_list[t] if isinstance(wcs_or_list, list) else wcs_or_list
             coord = SkyCoord(ra=radec_all[s, 0, t], dec=radec_all[s, 1, t], unit="deg")
-            x_c, y_c = wcs.world_to_pixel(coord)
+            x_c, y_c = wcs_t.world_to_pixel(coord)
             pix_xy[s, t] = [x_c, y_c]
             dist2 = (xx - x_c) ** 2 + (yy - y_c) ** 2
             masks[s].append(np.where(dist2 <= aperture_radius_pix ** 2))
@@ -269,7 +278,6 @@ def main():
     img_params = config["image"]["params"]
     n_pix = int(str(img_params["size"]).split()[0])
     pixel_deg = _parse_pixel_deg(str(img_params["scale"]))
-    n_times = int(img_params["intervals-out"])
     pixel_rad = np.deg2rad(pixel_deg)
 
     weight_str = str(img_params.get("weight", "natural"))
@@ -291,7 +299,7 @@ def main():
 
     print(f"MS path   : {ms_path}")
     print(f"Image path: {image_path}")
-    print(f"n_pix={n_pix}, pixel_deg={pixel_deg}°, n_times={n_times}")
+    print(f"n_pix={n_pix}, pixel_deg={pixel_deg}°")
     print(f"Weighting : {weight_str} (scheme={weight_scheme}, robust={briggs_robust})")
 
     # -----------------------------------------------------------------------
@@ -300,46 +308,70 @@ def main():
     t0 = _time.perf_counter()
     print("\n[1/4] Reading Measurement Set...")
 
-    xds = xds_from_ms(ms_path)[0]
-    xds_spw = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
+    xds_spw   = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
     xds_field = xds_from_table(ms_path + "::FIELD")[0]
-
-    uvw_all = xds.UVW.data.compute()                         # (N, 3)
-    times_all = xds.TIME.data.compute()                      # (N,)
-    flags_all = xds.FLAG.data.compute()[:, freq_chan, 0]     # (N,)
+    phase_dirs_all = xds_field.PHASE_DIR.data.compute()      # (n_fields, 1, 2) radians
     freq_hz = float(xds_spw.CHAN_FREQ.data.compute()[0, freq_chan])
-    phase_dir_rad = xds_field.PHASE_DIR.data.compute()[0, 0]  # (2,)
+    lam = 299792458.0 / freq_hz
 
-    phase_ra_deg = float(np.rad2deg(phase_dir_rad[0]))
-    phase_dec_deg = float(np.rad2deg(phase_dir_rad[1]))
+    # daskms partitions by FIELD_ID: multi-field MS → one dataset per scan,
+    # single-field MS → one dataset containing all rows.
+    all_datasets = xds_from_ms(ms_path, columns=["UVW", "TIME", "FLAG"])
+    multi_field  = len(all_datasets) > 1
 
-    lam = 299792458.0 / freq_hz                              # wavelength in metres
-
-    # Group row indices by time step (maintains time order)
-    unique_times = np.unique(times_all)
-    assert len(unique_times) == n_times, (
-        f"MS has {len(unique_times)} unique times but config expects {n_times}."
-    )
-    times_mjd = unique_times / (24 * 3600)
-
-    # Sort rows by time to allow reshape if uniform row counts
-    sort_idx = np.argsort(times_all, kind="stable")
-    _, counts = np.unique(times_all, return_counts=True)
-    uniform_rows = bool(np.all(counts == counts[0]))
-    rows_per_time = int(counts[0])
-
-    if uniform_rows:
-        # Reshape into (n_times, rows_per_time, ...) for fast slicing
-        uvw_t = (uvw_all[sort_idx] / lam).reshape(n_times, rows_per_time, 3)
-        flags_t = flags_all[sort_idx].reshape(n_times, rows_per_time)
-        time_idx = None  # use reshape slices instead
+    if multi_field:
+        # Sort partitions by their first TIME value to guarantee temporal order
+        all_datasets = sorted(
+            all_datasets,
+            key=lambda ds: float(ds.TIME.data[0].compute()),
+        )
+        n_times      = len(all_datasets)
+        fid_per_time = np.array([int(ds.attrs["FIELD_ID"]) for ds in all_datasets])
+        times_mjd    = np.array([float(ds.TIME.data[0].compute())
+                                 for ds in all_datasets]) / (24 * 3600)
+        uvw_t   = np.stack([ds.UVW.data.compute()   for ds in all_datasets]) / lam
+        flags_t = np.stack([ds.FLAG.data.compute()[:, freq_chan, 0]
+                            for ds in all_datasets])
+        # uniform_rows is always True for this layout; time_idx / sort_idx unused
+        rows_per_time = uvw_t.shape[1]
+        uniform_rows  = True
+        sort_idx      = None
+        time_idx      = None
+        print(f"  Multi-scan MS: {n_times} partitions (one per scan).")
     else:
-        uvw_t = uvw_all / lam
-        flags_t = flags_all
-        time_idx = [np.where(times_all == t)[0] for t in unique_times]
+        xds      = all_datasets[0]
+        uvw_all  = xds.UVW.data.compute()
+        times_all = xds.TIME.data.compute()
+        flags_all = xds.FLAG.data.compute()[:, freq_chan, 0]
+
+        unique_times  = np.unique(times_all)
+        n_times       = len(unique_times)
+        times_mjd     = unique_times / (24 * 3600)
+        fid_per_time  = np.zeros(n_times, dtype=int)
+
+        sort_idx = np.argsort(times_all, kind="stable")
+        _, counts = np.unique(times_all, return_counts=True)
+        uniform_rows  = bool(np.all(counts == counts[0]))
+        rows_per_time = int(counts[0])
+
+        if uniform_rows:
+            uvw_t   = (uvw_all[sort_idx] / lam).reshape(n_times, rows_per_time, 3)
+            flags_t = flags_all[sort_idx].reshape(n_times, rows_per_time)
+            time_idx = None
+        else:
+            uvw_t    = uvw_all / lam
+            flags_t  = flags_all
+            time_idx = [np.where(times_all == t)[0] for t in unique_times]
+
+    phase_ra_per_time  = np.rad2deg(phase_dirs_all[fid_per_time, 0, 0])
+    phase_dec_per_time = np.rad2deg(phase_dirs_all[fid_per_time, 0, 1])
+
+    # Reference phase centre for display (mean across time steps)
+    phase_ra_deg  = float(np.mean(phase_ra_per_time))
+    phase_dec_deg = float(np.mean(phase_dec_per_time))
 
     t1 = _time.perf_counter()
-    print(f"  Done in {t1 - t0:.2f}s | freq={freq_hz/1e6:.3f} MHz "
+    print(f"  Done in {t1 - t0:.2f}s | n_times={n_times} | freq={freq_hz/1e6:.3f} MHz "
           f"| phase=({phase_ra_deg:.4f}°, {phase_dec_deg:.4f}°)")
 
     # -----------------------------------------------------------------------
@@ -382,9 +414,21 @@ def main():
     print(f"  Done in {t1 - t0:.2f}s")
 
     # -----------------------------------------------------------------------
-    # 3. Build WCS (shared for all frames & data types)
+    # 3. Build WCS
     # -----------------------------------------------------------------------
-    wcs = _build_wcs(phase_ra_deg, phase_dec_deg, pixel_deg, n_pix)
+    # For a multi-scan MS each frame has its own phase centre, so source
+    # pixel positions must be computed per-frame.  A single reference WCS
+    # (mean phase centre) is used for the matplotlib figure axes so the
+    # coordinate grid remains stable across frames.
+    wcs_ref = _build_wcs(phase_ra_deg, phase_dec_deg, pixel_deg, n_pix)
+    if multi_field:
+        wcs = [
+            _build_wcs(float(phase_ra_per_time[t]), float(phase_dec_per_time[t]),
+                       pixel_deg, n_pix)
+            for t in range(n_times)
+        ]
+    else:
+        wcs = wcs_ref
 
     # -----------------------------------------------------------------------
     # 4. Process each data type
@@ -399,9 +443,22 @@ def main():
 
         # Read visibilities for this column
         t0 = _time.perf_counter()
-        vis_raw = xds[data_col].data.compute()[:, freq_chan, 0]  # (N,) complex
-        if uniform_rows:
-            vis_t_arr = vis_raw[sort_idx].reshape(n_times, rows_per_time)
+        if multi_field:
+            vis_datasets = sorted(
+                xds_from_ms(ms_path, columns=[data_col]),
+                key=lambda ds: int(ds.attrs["FIELD_ID"]),
+            )
+            vis_t_arr = np.stack([
+                ds[data_col].data.compute()[:, freq_chan, 0] for ds in vis_datasets
+            ])  # (n_times, rows_per_time)
+            vis_raw = None
+        else:
+            xds_vis = xds_from_ms(ms_path, columns=[data_col])[0]
+            vis_raw = xds_vis[data_col].data.compute()[:, freq_chan, 0]
+            if uniform_rows:
+                vis_t_arr = vis_raw[sort_idx].reshape(n_times, rows_per_time)
+            else:
+                vis_t_arr = None
         t1 = _time.perf_counter()
         print(f"  Visibility read: {t1 - t0:.2f}s")
 
@@ -448,15 +505,19 @@ def main():
         frames = []
         times_sec = (times_mjd - times_mjd[0]) * 86400.0
 
-        # Pre-compute aperture masks and pixel centres (avoids repeated WCS calls)
+        # Pre-compute aperture masks and pixel centres (avoids repeated WCS calls).
+        # For multi-scan MSes, wcs is a per-frame list so each source position
+        # is projected onto its own scan's phase centre.
         t_pre = _time.perf_counter()
         ap_masks, pix_xy, ap_radius_pix = _aperture_pixel_coords(
             wcs, radec_all, aperture_radius_deg, n_pix
         )
         print(f"  Aperture pre-compute: {_time.perf_counter() - t_pre:.2f}s")
 
-        # Build figure once, update data each frame (saves ~50% of matplotlib overhead)
-        fig, ax, im_obj = _make_frame_setup(wcs, vmin, vmax)
+        # Build figure once, update data each frame (saves ~50% of matplotlib overhead).
+        # Always use the reference WCS for the figure axes so the coordinate grid
+        # is stable even when individual frames have different phase centres.
+        fig, ax, im_obj = _make_frame_setup(wcs_ref, vmin, vmax)
         buf = io.BytesIO()
 
         for f_idx, im_data in enumerate(images):
