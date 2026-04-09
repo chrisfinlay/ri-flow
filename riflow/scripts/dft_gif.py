@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """
-nufft_gif.py - Create GIF directly from a Measurement Set using jax-finufft.
+dft_gif.py - Create GIF from a Measurement Set using an exact discrete
+Fourier transform imager.
 
-Replaces the two-step: `extract` (WSClean) + `mk-gif` workflow.
+Unlike nufft_gif.py (which uses jax-finufft and w-stacking), this script
+computes each pixel's value by summing the exact per-baseline phase.  There
+is no interpolation kernel and no w-binning approximation.  W-correction is
+applied per-baseline when -w is given.
+
+This is useful as a reference / validation image and for cases where the
+NUFFT interpolation kernel causes artefacts.  It is slower than the NUFFT
+imager for large images (O(N_pix² × N_vis) vs O(N_pix² log N_pix)) but
+competitive for EDA2-scale data (256×256, few-thousand baselines per snapshot).
 
 Usage:
-    python nufft_gif.py -c img_starlink_1chan.yaml -d tab_rfi -tsx sgp4_bstar_var
+    dft-gif -c img_starlink_1chan.yaml -d tab_rfi -tsx sgp4_bstar_var
+    dft-gif -c img_starlink_1chan.yaml -d tab_rfi -w          # with w-correction
 """
 
 import time as _time
@@ -17,9 +27,6 @@ import os
 import argparse
 import warnings
 import numpy as np
-
-import jax.numpy as jnp
-from jax_finufft import nufft1
 
 import matplotlib
 matplotlib.use("Agg")
@@ -39,13 +46,13 @@ from riflow.coords import get_tles, sat_radec, get_fornax_radec
 from riflow.io.ms import read_ants_itrf, recopy_tab_results
 from riflow.extraction.light_curves import get_region_stats, plot_light_curves
 from riflow.imaging.weights import parse_weight, compute_weights
-from riflow.imaging.wstack import dirty_image_wstack, estimate_n_wplanes
+from riflow.imaging.dft import dirty_image_dft
 
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers (identical to nufft_gif.py)
 # ---------------------------------------------------------------------------
 
 def _parse_pixel_deg(scale_str: str) -> float:
@@ -57,24 +64,18 @@ def _parse_pixel_deg(scale_str: str) -> float:
         return float(s[:-4]) / 3600.0
     if s.endswith("adeg"):
         return float(s[:-4])
-    return float(s)  # assume degrees
+    return float(s)
 
 
 def _build_wcs(ra_deg: float, dec_deg: float, pixel_deg: float, n_pix: int) -> WCS:
     """Build a SIN-projection WCS matching WSClean's output convention."""
     wcs = WCS(naxis=2)
-    wcs.wcs.crpix = [n_pix // 2 + 1, n_pix // 2 + 1]   # 1-indexed centre
+    wcs.wcs.crpix = [n_pix // 2 + 1, n_pix // 2 + 1]
     wcs.wcs.crval = [ra_deg, dec_deg]
-    wcs.wcs.cdelt = [-pixel_deg, pixel_deg]               # RA decreases left→right
+    wcs.wcs.cdelt = [-pixel_deg, pixel_deg]
     wcs.wcs.ctype = ["RA---SIN", "DEC--SIN"]
     wcs.wcs.cunit = ["deg", "deg"]
     return wcs
-
-
-# Weight helpers now live in riflow.imaging.weights; imported above.
-# Local aliases for backward compat within this module.
-_parse_weight   = parse_weight
-_compute_weights = compute_weights
 
 
 def _parse_channels(chan_str: str, n_chan: int) -> np.ndarray:
@@ -101,68 +102,19 @@ def _parse_channels(chan_str: str, n_chan: int) -> np.ndarray:
         raise ValueError(f"Cannot parse channel selection '{chan_str}': {exc}") from exc
 
 
-def _dirty_image(
-    u_wl: np.ndarray,
-    v_wl: np.ndarray,
-    vis: np.ndarray,
-    n_pix: int,
-    pixel_rad: float,
-    weights: np.ndarray | None = None,
-) -> np.ndarray:
-    """
-    Compute dirty image for one time step using NUFFT type-1.
-
-    Input u/v are in wavelengths.  The image convention follows WSClean:
-      - rows  → Dec  (m direction, v conjugate)
-      - cols  → RA   (l direction, u conjugate, *decreasing* left→right)
-    """
-    if weights is None:
-        weights = np.ones(len(u_wl), dtype=np.float32)
-
-    # Apply weights, then add Hermitian conjugates
-    wvis = (vis * weights).astype(np.complex64)
-    u_all = np.concatenate([u_wl, -u_wl]).astype(np.float32)
-    v_all = np.concatenate([v_wl, -v_wl]).astype(np.float32)
-    vis_all = np.concatenate([wvis, wvis.conj()])
-
-    # Scale to NUFFT coordinates in [-π, π].
-    # Convention matching WSClean/FITS (CDELT1 < 0, east to left):
-    #   rows (first dim,  x = -2π·pr·v) → Dec/m, north (+v) → higher row  ✓
-    #   cols (second dim, y = +2π·pr·u) → RA/l,  west (-RA) → higher col  ✓
-    u_nufft = jnp.array(2.0 * np.pi * pixel_rad * u_all)
-    v_nufft = jnp.array(2.0 * np.pi * pixel_rad * (-v_all))
-    vis_jax = jnp.array(vis_all)
-
-    # nufft1: first coord → rows (Dec/-v), second coord → cols (RA/u)
-    im = nufft1((n_pix, n_pix), vis_jax, v_nufft, u_nufft)
-    # Normalise by total weight (×2 for conjugates) so a unit point source → peak ≈ 1
-    return np.array(jnp.real(im)) / (2.0 * float(weights.sum()))
-
-
 def _aperture_pixel_coords(
     wcs_or_list: "WCS | list[WCS]",
     radec_all: np.ndarray,
     aperture_radius_deg: float,
     n_pix: int,
-) -> tuple[list[np.ndarray], np.ndarray]:
-    """
-    Pre-compute per-frame aperture pixel masks for all sources.
-
-    wcs_or_list may be a single WCS (shared across all frames) or a list of
-    per-frame WCS objects (one per time step, for multi-scan MSes where each
-    integration has its own phase centre).
-
-    Returns
-    -------
-    masks : list[ndarray]  shape (n_sources, n_times) of (n_pix_in_mask,) index arrays
-    pix_xy : ndarray  shape (n_sources, n_times, 2)  — (x_centre, y_centre) per frame
-    """
+) -> tuple[list[np.ndarray], np.ndarray, float]:
+    """Pre-compute per-frame aperture pixel masks for all sources."""
     wcs0 = wcs_or_list[0] if isinstance(wcs_or_list, list) else wcs_or_list
     pixel_scales = proj_plane_pixel_scales(wcs0)[:2]
     aperture_radius_pix = aperture_radius_deg / np.mean(pixel_scales)
 
     n_sources, _, n_times = radec_all.shape
-    yy, xx = np.mgrid[0:n_pix, 0:n_pix]  # (n_pix, n_pix)
+    yy, xx = np.mgrid[0:n_pix, 0:n_pix]
 
     pix_xy = np.empty((n_sources, n_times, 2))
     masks: list[list[np.ndarray]] = [[] for _ in range(n_sources)]
@@ -201,7 +153,7 @@ def _make_frame_setup(wcs: WCS, vmin: float, vmax: float):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create GIF from MS using jax-finufft (replaces extract + mk-gif)."
+        description="Create GIF from MS using exact DFT imaging."
     )
     parser.add_argument("-c", "--config_path", required=True, help="Config YAML path.")
     parser.add_argument("-d", "--data_types", default="tab_rfi",
@@ -212,7 +164,7 @@ def main():
     parser.add_argument("-tsx", "--tab_suffix", default=None,
                         help="TABASCAL solution suffix (e.g. sgp4_bstar_var).")
     parser.add_argument("-img", "--img_suffix", default=None,
-                        help="Image parameter suffix (e.g. 'briggs05', 'uniform').")
+                        help="Image parameter suffix (e.g. 'dft', 'dft_w').")
     parser.add_argument("-g", "--gif_suffix", default=None, help="Extra GIF suffix.")
     parser.add_argument("-n", "--norad_ids", default=None,
                         help="Extra NORAD IDs (comma-separated).")
@@ -220,10 +172,11 @@ def main():
                         help="Aperture circle radius in degrees.")
     parser.add_argument("-st", "--spacetrack_path", default=None,
                         help="Space-Track login YAML path.")
-    parser.add_argument("-ws", "--wstack", action="store_true", default=False,
-                        help="Enable w-stacking correction for wide-field imaging.")
-    parser.add_argument("-nw", "--n_wplanes", type=int, default=None,
-                        help="Number of w-stacking planes (default: auto-estimated from data).")
+    parser.add_argument("-w", "--wcorrect", action="store_true", default=False,
+                        help="Apply exact per-baseline w-correction (no binning).")
+    parser.add_argument("-pc", "--pixel_chunk", type=int, default=4096,
+                        help="Pixels per JAX kernel call (tune for memory vs speed, "
+                             "default 4096).")
     parser.add_argument("-rc", "--recopy", action="store_true", default=False,
                         help="Re-copy TABASCAL results from the matching zarr into the MS "
                              "before imaging.  Requires -tsx.")
@@ -253,26 +206,23 @@ def main():
     norad_ids: list[int] = list(config["gif"].get("norad_ids", []))
     if args.norad_ids:
         norad_ids += [int(x) for x in args.norad_ids.split(",")]
-    norad_ids = list(dict.fromkeys(norad_ids))  # deduplicate, preserve order
+    norad_ids = list(dict.fromkeys(norad_ids))
 
     aperture_radius_deg: float = args.radius_deg or float(
         config["gif"].get("marker_radius_deg", 3.0)
     )
 
-    # --- Image parameters from config ---
-    img_params = config["image"]["params"]
-    n_pix = int(str(img_params["size"]).split()[0])
-    pixel_deg = _parse_pixel_deg(str(img_params["scale"]))
-    pixel_rad = np.deg2rad(pixel_deg)
+    # --- Image parameters ---
+    img_params    = config["image"]["params"]
+    n_pix         = int(str(img_params["size"]).split()[0])
+    pixel_deg     = _parse_pixel_deg(str(img_params["scale"]))
+    pixel_rad     = np.deg2rad(pixel_deg)
+    weight_str    = str(img_params.get("weight", "natural"))
+    weight_scheme, briggs_robust = parse_weight(weight_str)
 
-    weight_str = str(img_params.get("weight", "natural"))
-    weight_scheme, briggs_robust = _parse_weight(weight_str)
-
-    # W-stacking: CLI flag takes priority, then config, default off
-    use_wstack = args.wstack or bool(img_params.get("wstack", False))
-    n_wplanes_cfg = args.n_wplanes or img_params.get("n_wplanes", None)
-    if n_wplanes_cfg is not None:
-        n_wplanes_cfg = int(n_wplanes_cfg)
+    # W-correction: CLI flag takes priority, then config
+    use_wcorrect = args.wcorrect or bool(img_params.get("wcorrect", False))
+    pixel_chunk  = args.pixel_chunk
 
     # Channel selection string — CLI > config > legacy freq_chan > all channels
     _cfg_freq_chan = config["data"].get("freq_chan")
@@ -302,7 +252,8 @@ def main():
     print(f"Image path: {image_path}")
     print(f"n_pix={n_pix}, pixel_deg={pixel_deg}°")
     print(f"Weighting : {weight_str} (scheme={weight_scheme}, robust={briggs_robust})")
-    print(f"W-stacking: {'ON' if use_wstack else 'OFF (flat-sky 2D)'}")
+    print(f"Imager    : exact DFT  |  W-correction: {'ON (per-baseline)' if use_wcorrect else 'OFF (flat-sky)'}")
+    print(f"pixel_chunk={pixel_chunk}")
 
     # -----------------------------------------------------------------------
     # 0. Optionally re-copy TABASCAL results from zarr → MS columns
@@ -321,27 +272,24 @@ def main():
         )
 
     # -----------------------------------------------------------------------
-    # 1. Read MS (once, shared across all data types)
+    # 1. Read MS
     # -----------------------------------------------------------------------
     t0 = _time.perf_counter()
     print("\n[1/4] Reading Measurement Set...")
 
     xds_spw   = xds_from_table(ms_path + "::SPECTRAL_WINDOW")[0]
     xds_field = xds_from_table(ms_path + "::FIELD")[0]
-    phase_dirs_all = xds_field.PHASE_DIR.data.compute()      # (n_fields, 1, 2) radians
+    phase_dirs_all = xds_field.PHASE_DIR.data.compute()
 
     # --- Channel selection ---
     all_chan_freqs = xds_spw.CHAN_FREQ.data.compute()[0]      # (n_chan_total,)
     n_chan_total   = len(all_chan_freqs)
-    chan_sel       = _parse_channels(chan_sel_str, n_chan_total)  # index array
+    chan_sel       = _parse_channels(chan_sel_str, n_chan_total)
     chan_freqs     = all_chan_freqs[chan_sel]                  # Hz, selected
     chan_lams      = 299792458.0 / chan_freqs                  # metres
     n_chan_sel     = len(chan_sel)
-    lam_min        = float(np.min(chan_lams))                 # shortest λ (highest freq)
 
-    # daskms partitions by FIELD_ID: multi-field MS → one dataset per scan,
-    # single-field MS → one dataset containing all rows.
-    # UVW is kept in metres; lambda scaling is applied per-channel during imaging.
+    # UVW kept in metres; lambda scaling is applied per-channel during imaging.
     all_datasets = xds_from_ms(ms_path, columns=["UVW", "TIME", "FLAG"])
     multi_field  = len(all_datasets) > 1
 
@@ -381,25 +329,13 @@ def main():
         rows_per_time = int(counts[0])
 
         if uniform_rows:
-            # uvw_t_m: (n_times, rows_per_time, 3) metres
             uvw_t_m = uvw_all[sort_idx].reshape(n_times, rows_per_time, 3)
-            # flags_t: (n_times, rows_per_time, n_chan_sel)
             flags_t = flags_all[sort_idx].reshape(n_times, rows_per_time, n_chan_sel)
             time_idx = None
         else:
-            uvw_t_m  = uvw_all                                # (n_rows, 3) metres
-            flags_t  = flags_all                              # (n_rows, n_chan_sel)
+            uvw_t_m  = uvw_all
+            flags_t  = flags_all
             time_idx = [np.where(times_all == t)[0] for t in unique_times]
-
-    # Report w-range and auto-estimate n_wplanes (use lam_min for worst-case w/λ)
-    if use_wstack:
-        w_all_m    = uvw_t_m[:, :, 2].ravel() if uniform_rows else uvw_t_m[:, 2]
-        w_all_wl   = w_all_m / lam_min
-        w_min_val, w_max_val = float(w_all_wl.min()), float(w_all_wl.max())
-        if n_wplanes_cfg is None:
-            n_wplanes_cfg = estimate_n_wplanes(w_all_wl, n_pix, pixel_rad)
-        print(f"  W-range (λ_min={lam_min:.3f} m): [{w_min_val:.1f}, {w_max_val:.1f}] λ "
-              f"| n_wplanes={n_wplanes_cfg}")
 
     phase_ra_per_time  = np.rad2deg(phase_dirs_all[fid_per_time, 0, 0])
     phase_dec_per_time = np.rad2deg(phase_dirs_all[fid_per_time, 0, 1])
@@ -414,17 +350,17 @@ def main():
           f"| phase=({phase_ra_deg:.4f}°, {phase_dec_deg:.4f}°)")
 
     # -----------------------------------------------------------------------
-    # 2. Get satellite positions (TLE propagation via Skyfield)
+    # 2. Satellite positions
     # -----------------------------------------------------------------------
     print("\n[2/4] Fetching TLEs and propagating satellite positions...")
     t0 = _time.perf_counter()
 
-    from tabsim.jax.coordinates import mjd_to_jd  # noqa: F401 (needed for get_tles)
+    from tabsim.jax.coordinates import mjd_to_jd  # noqa: F401
 
     ants_itrf = read_ants_itrf(ms_path)
-    obs_xyz = np.mean(ants_itrf, axis=0)
+    obs_xyz   = np.mean(ants_itrf, axis=0)
 
-    radec_sats = None
+    radec_sats  = None
     sat_labels: list[str] = []
 
     if norad_ids and spacetrack_path:
@@ -433,20 +369,20 @@ def main():
         )
         radec_sats = np.stack(
             [sat_radec(tle, times_mjd, obs_xyz) for tle in tles], axis=0
-        )  # (n_sats, 2, n_times)
+        )
         sat_labels = [str(nid) for nid in valid_norad_ids]
         print(f"  Satellites: {sat_labels}")
     else:
         print("  No NORAD IDs or Space-Track path — skipping satellite circles.")
 
-    fornax_radec = get_fornax_radec(n_times)  # (1, 2, n_times)
+    fornax_radec = get_fornax_radec(n_times)
 
     if radec_sats is not None:
         radec_all = np.concatenate([radec_sats, fornax_radec], axis=0)
-        titles = sat_labels + ["Fornax A"]
+        titles    = sat_labels + ["Fornax A"]
     else:
         radec_all = fornax_radec
-        titles = ["Fornax A"]
+        titles    = ["Fornax A"]
 
     n_sources = len(titles)
     t1 = _time.perf_counter()
@@ -455,10 +391,6 @@ def main():
     # -----------------------------------------------------------------------
     # 3. Build WCS
     # -----------------------------------------------------------------------
-    # For a multi-scan MS each frame has its own phase centre, so source
-    # pixel positions must be computed per-frame.  A single reference WCS
-    # (mean phase centre) is used for the matplotlib figure axes so the
-    # coordinate grid remains stable across frames.
     wcs_ref = _build_wcs(phase_ra_deg, phase_dec_deg, pixel_deg, n_pix)
     if multi_field:
         wcs = [
@@ -481,7 +413,7 @@ def main():
         gif_base = f"{data_type}{tab_suffix}{img_suffix}{gif_suffix}{tab_data_suffix}"
         print(f"\n[3/4] Imaging data column '{data_col}' -> '{gif_base}'")
 
-        # Read visibilities for this column — all selected channels
+        # Read visibilities — all selected channels
         t0 = _time.perf_counter()
         if multi_field:
             vis_datasets = sorted(
@@ -503,8 +435,6 @@ def main():
         print(f"  Visibility read: {t1 - t0:.2f}s")
 
         # --- Build imaging runs ---
-        # MFS:     one pass concatenating all selected channels → one GIF
-        # perchan: one pass per channel  → one GIF per channel
         if mode == "mfs":
             imaging_runs: list[tuple[np.ndarray, str]] = [(np.arange(n_chan_sel), "")]
         else:
@@ -515,13 +445,12 @@ def main():
 
         for run_chans, run_suffix in imaging_runs:
             run_gif_name = f"{gif_base}{run_suffix}"
-            run_lams = chan_lams[run_chans]  # wavelengths (m) for this run's channels
+            run_lams = chan_lams[run_chans]
 
-            # --- Compute dirty images for all time steps ---
+            # --- Compute dirty images ---
             t0 = _time.perf_counter()
             images = []
             for t_idx in range(n_times):
-                # Concatenate channels into one (u,v,w,vis) set (MFS) or use one channel
                 u_list: list[np.ndarray] = []
                 v_list: list[np.ndarray] = []
                 w_list: list[np.ndarray] = []
@@ -560,14 +489,13 @@ def main():
                 w_v   = np.concatenate(w_list)
                 vis_v = np.concatenate(vis_list)
 
-                wgt = _compute_weights(u_v, v_v, n_pix, pixel_rad, weight_scheme, briggs_robust)
-                if use_wstack:
-                    im = dirty_image_wstack(
-                        u_v, v_v, w_v, vis_v, n_pix, pixel_rad,
-                        weights=wgt, n_wplanes=n_wplanes_cfg,
-                    )
-                else:
-                    im = _dirty_image(u_v, v_v, vis_v, n_pix, pixel_rad, wgt)
+                wgt = compute_weights(u_v, v_v, n_pix, pixel_rad, weight_scheme, briggs_robust)
+                im = dirty_image_dft(
+                    u_v, v_v, vis_v, n_pix, pixel_rad,
+                    weights=wgt,
+                    w_wl=w_v if use_wcorrect else None,
+                    pixel_chunk=pixel_chunk,
+                )
                 images.append(im)
 
                 if t_idx == 0:
@@ -587,18 +515,12 @@ def main():
             frames = []
             times_sec = (times_mjd - times_mjd[0]) * 86400.0
 
-            # Pre-compute aperture masks and pixel centres (avoids repeated WCS calls).
-            # For multi-scan MSes, wcs is a per-frame list so each source position
-            # is projected onto its own scan's phase centre.
             t_pre = _time.perf_counter()
             ap_masks, pix_xy, ap_radius_pix = _aperture_pixel_coords(
                 wcs, radec_all, aperture_radius_deg, n_pix
             )
             print(f"  Aperture pre-compute: {_time.perf_counter() - t_pre:.2f}s")
 
-            # Build figure once, update data each frame (saves ~50% of matplotlib overhead).
-            # Always use the reference WCS for the figure axes so the coordinate grid
-            # is stable even when individual frames have different phase centres.
             fig, ax, im_obj = _make_frame_setup(wcs_ref, vmin, vmax)
             buf = io.BytesIO()
 
