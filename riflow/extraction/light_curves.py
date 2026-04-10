@@ -122,6 +122,86 @@ def get_region_stats(
         return stats
 
 
+def plot_spectrogram(
+    times: np.ndarray,
+    chan_freqs_mhz: np.ndarray,
+    lc_per_chan: np.ndarray,
+    titles: list,
+    save_name: str,
+) -> None:
+    """Plot time-frequency spectrograms from per-channel light curves.
+
+    The colour value is max(|min|, |max|) — the peak absolute flux in the aperture.
+
+    Parameters
+    ----------
+    times          : (n_times,) time in seconds from observation start
+    chan_freqs_mhz : (n_chan,) channel centre frequencies in MHz
+    lc_per_chan    : (n_chan, n_sources, n_times, 3) — axis -1 is [min, mean, max]
+    titles         : source names, length n_sources
+    save_name      : output PNG path
+    """
+    n_sources = len(titles)
+    # peak absolute flux: max(|min|, |max|) per channel/source/time
+    data = np.maximum(np.abs(lc_per_chan[:, :, :, 0]),
+                      np.abs(lc_per_chan[:, :, :, 2]))  # (n_chan, n_sources, n_times)
+
+    fig, axes = plt.subplots(n_sources, 1, figsize=(10, 4 * n_sources), squeeze=False)
+
+    for s_idx, ax in enumerate(axes[:, 0]):
+        z = data[:, s_idx, :]  # (n_chan, n_times)
+        pcm = ax.pcolormesh(times, chan_freqs_mhz, z, shading="nearest", cmap="inferno")
+        fig.colorbar(pcm, ax=ax, label="Flux [max|peak|] [Jy/bm]")
+        ax.set_title(titles[s_idx])
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Frequency [MHz]")
+
+    plt.tight_layout()
+    plt.savefig(save_name, dpi=200, format="png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_spectrum(
+    chan_freqs_mhz: np.ndarray,
+    lc_per_chan: np.ndarray,
+    titles: list,
+    save_name: str,
+) -> None:
+    """Plot flux spectrum (frequency vs flux) from per-channel light curves.
+
+    For each channel the per-timestep peak absolute flux is max(|min|, |max|).
+    Two curves are shown per source: the mean and max of this quantity over time.
+
+    Parameters
+    ----------
+    chan_freqs_mhz : (n_chan,) channel centre frequencies in MHz
+    lc_per_chan    : (n_chan, n_sources, n_times, 3) — axis -1 is [min, mean, max]
+    titles         : source names, length n_sources
+    save_name      : output PNG path
+    """
+    n_sources = len(titles)
+    peak_abs = np.maximum(np.abs(lc_per_chan[:, :, :, 0]),
+                          np.abs(lc_per_chan[:, :, :, 2]))  # (n_chan, n_sources, n_times)
+
+    mean_over_time = peak_abs.mean(axis=2)  # (n_chan, n_sources)
+    max_over_time  = peak_abs.max(axis=2)   # (n_chan, n_sources)
+
+    fig, axes = plt.subplots(n_sources, 1, figsize=(8, 4 * n_sources), squeeze=False)
+
+    for s_idx, ax in enumerate(axes[:, 0]):
+        ax.plot(chan_freqs_mhz, mean_over_time[:, s_idx], label="mean over time")
+        ax.plot(chan_freqs_mhz, max_over_time[:, s_idx],  label="max over time")
+        ax.set_title(titles[s_idx])
+        ax.set_xlabel("Frequency [MHz]")
+        ax.set_ylabel("Flux [Jy/bm]")
+        ax.legend()
+        ax.grid()
+
+    plt.tight_layout()
+    plt.savefig(save_name, dpi=200, format="png", bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_light_curves(
     times: np.ndarray, light_curves: np.ndarray, titles: list, save_name: str
 ):

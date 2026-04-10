@@ -37,7 +37,7 @@ from riflow import load_config
 from riflow.config import prepend_suffix
 from riflow.coords import get_tles, sat_radec, get_fornax_radec
 from riflow.io.ms import read_ants_itrf, recopy_tab_results
-from riflow.extraction.light_curves import get_region_stats, plot_light_curves
+from riflow.extraction.light_curves import get_region_stats, plot_light_curves, plot_spectrogram, plot_spectrum
 from riflow.imaging.weights import parse_weight, compute_weights
 from riflow.imaging.wstack import dirty_image_wstack, estimate_n_wplanes
 
@@ -513,6 +513,8 @@ def main():
                 for ci in range(n_chan_sel)
             ]
 
+        perchan_lcs: list[np.ndarray] = []  # accumulate for spectrogram
+
         for run_chans, run_suffix in imaging_runs:
             run_gif_name = f"{gif_base}{run_suffix}"
             run_lams = chan_lams[run_chans]  # wavelengths (m) for this run's channels
@@ -658,9 +660,22 @@ def main():
                 titles,
                 os.path.join(save_path, f"{run_gif_name}.png"),
             )
+            if mode == "perchan":
+                perchan_lcs.append(light_curves)
 
             t1 = _time.perf_counter()
             print(f"  Frame render + GIF: {t1 - t0:.2f}s")
+
+        # --- Spectrogram + spectrum (perchan mode, more than one channel) ---
+        if mode == "perchan" and len(perchan_lcs) > 1:
+            lc_stack = np.stack(perchan_lcs)  # (n_chan_sel, n_sources, n_times, 3)
+            freqs_mhz = chan_freqs / 1e6
+            spec_path = os.path.join(save_path, f"{gif_base}_spectrogram.png")
+            plot_spectrogram(times_sec, freqs_mhz, lc_stack, titles, spec_path)
+            print(f"Spectrogram saved as {spec_path}")
+            spect_path = os.path.join(save_path, f"{gif_base}_spectrum.png")
+            plot_spectrum(freqs_mhz, lc_stack, titles, spect_path)
+            print(f"Spectrum saved as {spect_path}")
 
     t_total = _time.perf_counter() - _t_start
     print(f"\nTotal wall time: {t_total:.2f}s")
