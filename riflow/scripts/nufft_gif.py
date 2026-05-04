@@ -63,6 +63,9 @@ def main():
                         help="In perchan mode, save one light curve PNG per channel "
                              "(original behaviour).  Default is a single grid figure "
                              "with one subplot per frequency channel.")
+    parser.add_argument("-tr", "--time-range", default=None,
+                        help="Time index selection for the integrated image plot, numpy-style "
+                             "(e.g. ':', '0:50', '10:60', '::2'). Default: all timesteps.")
     parser.add_argument("-fs", "--frame-shift", type=float, default=None,
                         help="Add a time-shifted copy of each satellite track as a background "
                              "sky reference.  Value in (-1, 1) sets the shift as a fraction of "
@@ -89,6 +92,7 @@ def _run(args):
     from riflow.imaging.nufft_helpers import (
         _parse_pixel_deg, _build_wcs, _parse_channels,
         _dirty_image, _aperture_pixel_coords, _estimate_noise_level, _make_frame_setup,
+        _save_image_png, _save_image_grid, _source_pixel_xy,
     )
     import matplotlib.pyplot as plt
     from matplotlib.patches import Circle
@@ -273,6 +277,10 @@ def _run(args):
     print(f"  Done in {t1 - t0:.2f}s | n_times={n_times} | {freq_range_str} "
           f"| phase=({phase_ra_deg:.4f}°, {phase_dec_deg:.4f}°)")
 
+    time_sel_str    = args.time_range or ":"
+    time_sel        = _parse_channels(time_sel_str, n_times)
+    time_range_suffix = f"_tidx_{time_sel[0]}-{time_sel[-1]}"
+
     # -----------------------------------------------------------------------
     # 2. Get satellite positions (TLE propagation via Skyfield)
     # -----------------------------------------------------------------------
@@ -389,11 +397,23 @@ def _run(args):
                 for ci in range(n_chan_sel)
             ]
 
-        perchan_lcs:   list[np.ndarray] = []
-        perchan_noise: list[float]     = []
+        perchan_lcs:    list[np.ndarray] = []
+        perchan_noise:  list[float]     = []
+        perchan_images: list[np.ndarray] = []
+
+        chan_range_suffix  = f"_chan_{chan_sel[0]}-{chan_sel[-1]}"
+        ap_radius_pix_ref = aperture_radius_deg / pixel_deg
+        pix_xy_ref        = _source_pixel_xy(wcs_ref, radec_all, time_sel)
 
         if mode == "perchan":
-            print(f"  Saving GIFs as {os.path.join(save_path, gif_base)}_ch<N>.gif")
+            perchan_gif_dir = os.path.join(
+                save_path,
+                f"{gif_base}{chan_range_suffix}{time_range_suffix}_gifs",
+            )
+            os.makedirs(perchan_gif_dir, exist_ok=True)
+            print(f"  Saving perchan GIFs into {perchan_gif_dir}/")
+        else:
+            perchan_gif_dir = save_path
         chan_desc = "Channels" if mode == "perchan" else "MFS"
         for run_chans, run_suffix in tqdm(imaging_runs, desc=chan_desc, unit="chan"):
             run_gif_name = f"{gif_base}{run_suffix}"
@@ -450,6 +470,10 @@ def _run(args):
                     im = _dirty_image(u_v, v_v, vis_v, n_pix, pixel_rad, wgt)
                 images.append(im)
 
+
+            # --- Integrated image over selected time range ---
+            integrated_im = np.mean(np.stack([images[t] for t in time_sel]), axis=0)
+            perchan_images.append(integrated_im)
 
             # --- Extract light curves + render GIF ---
             no_gif = args.no_gif
@@ -518,7 +542,7 @@ def _run(args):
 
                 plt.close(fig)
 
-                gif_path = os.path.join(save_path, f"{run_gif_name}.gif")
+                gif_path = os.path.join(perchan_gif_dir, f"{run_gif_name}.gif")
                 frames[0].save(
                     gif_path,
                     save_all=True,
@@ -551,7 +575,27 @@ def _run(args):
                 perchan_noise.append(noise_level)
 
 
-        chan_range_suffix = f"_chan_{chan_sel[0]}-{chan_sel[-1]}"
+        # --- Integrated image plot(s) ---
+        if mode == "mfs":
+            img_path = os.path.join(
+                save_path,
+                f"{gif_base}_mfs-chan_{chan_sel[0]}-{chan_sel[-1]}{time_range_suffix}_image.png",
+            )
+            _save_image_png(
+                perchan_images[0], wcs_ref, img_path,
+                pix_xy=pix_xy_ref, ap_radius_pix=ap_radius_pix_ref, source_titles=titles,
+            )
+            print(f"Integrated image saved as {img_path}")
+        else:
+            img_grid_path = os.path.join(
+                save_path,
+                f"{gif_base}_perchan_image_grid{chan_range_suffix}{time_range_suffix}.png",
+            )
+            _save_image_grid(
+                perchan_images, wcs_ref, chan_freqs / 1e6, img_grid_path,
+                pix_xy=pix_xy_ref, ap_radius_pix=ap_radius_pix_ref, source_titles=titles,
+            )
+            print(f"Perchan image grid saved as {img_grid_path}")
 
         # --- Per-channel light curve grid (perchan mode, default) ---
         if mode == "perchan" and not args.per_chan_lc and len(perchan_lcs) > 0:

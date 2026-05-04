@@ -7,6 +7,7 @@ from jax_finufft import nufft1
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 
 from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
@@ -193,3 +194,134 @@ def _make_frame_setup(wcs: WCS, vmin: float, vmax: float):
     cb = ax.figure.colorbar(im_obj, cax=cax, orientation="vertical")
     cb.ax.tick_params(labelsize=6)
     return fig, ax, im_obj
+
+
+def _source_pixel_xy(
+    wcs: WCS,
+    radec_all: np.ndarray,
+    time_sel: np.ndarray,
+) -> np.ndarray:
+    """Return pixel positions (n_sources, n_sel, 2) for sources at selected times."""
+    n_sources, _, _ = radec_all.shape
+    n_sel = len(time_sel)
+    pix = np.empty((n_sources, n_sel, 2))
+    for s in range(n_sources):
+        for i, t in enumerate(time_sel):
+            coord = SkyCoord(ra=radec_all[s, 0, t], dec=radec_all[s, 1, t], unit="deg")
+            pix[s, i] = wcs.world_to_pixel(coord)
+    return pix
+
+
+def _draw_source_overlays(
+    ax,
+    pix_xy: np.ndarray,
+    ap_radius_pix: float,
+    source_titles: list,
+    n_pix: int,
+    fontsize: int = 7,
+) -> None:
+    """Draw aperture circle for Fornax and track dots for satellites on ax.
+
+    pix_xy : (n_sources, n_sel, 2)
+    """
+    sat_r = max(1.5, ap_radius_pix / 6.0)
+    mid = pix_xy.shape[1] // 2
+
+    for s, title in enumerate(source_titles):
+        is_fornax  = "fornax"  in title.lower()
+        is_shifted = "shifted" in title.lower()
+
+        if is_shifted:
+            continue
+
+        color = "cyan" if is_fornax else "red"
+
+        if is_fornax:
+            x_c, y_c = float(pix_xy[s, mid, 0]), float(pix_xy[s, mid, 1])
+            if 0 <= x_c < n_pix and 0 <= y_c < n_pix:
+                ax.add_patch(Circle((x_c, y_c), ap_radius_pix,
+                                    edgecolor=color, facecolor="none", linewidth=1.5))
+                ax.text(x_c + ap_radius_pix * 1.05, y_c, title,
+                        color=color, fontsize=fontsize, ha="left", va="center")
+        else:
+            for i in range(pix_xy.shape[1]):
+                x_c, y_c = float(pix_xy[s, i, 0]), float(pix_xy[s, i, 1])
+                if 0 <= x_c < n_pix and 0 <= y_c < n_pix:
+                    ax.add_patch(Circle((x_c, y_c), sat_r,
+                                        edgecolor=color, facecolor=color,
+                                        alpha=0.6, linewidth=0.0))
+            x_m, y_m = float(pix_xy[s, mid, 0]), float(pix_xy[s, mid, 1])
+            if 0 <= x_m < n_pix and 0 <= y_m < n_pix:
+                ax.text(x_m + sat_r * 1.5, y_m, title,
+                        color=color, fontsize=fontsize, ha="left", va="center")
+
+
+def _save_image_png(
+    image: np.ndarray,
+    wcs: WCS,
+    save_path: str,
+    title: str = "",
+    pix_xy: np.ndarray | None = None,
+    ap_radius_pix: float = 0.0,
+    source_titles: list | None = None,
+) -> None:
+    """Save a single integrated dirty image as a PNG with WCS axes."""
+    n_pix = image.shape[0]
+    vmin, vmax = np.percentile(image, [0.5, 99.5])
+    fig = plt.figure(figsize=(6, 6))
+    ax = fig.add_subplot(111, projection=wcs)
+    im_obj = ax.imshow(image, cmap="gray", vmin=vmin, vmax=vmax, origin="lower")
+    ax.coords.grid(True, color="blue", ls="dotted")
+    ax.coords[0].set_axislabel("Right Ascension")
+    ax.coords[1].set_axislabel("Declination")
+    cax = ax.inset_axes((0.87, 0.05, 0.03, 0.4))
+    cb = ax.figure.colorbar(im_obj, cax=cax, orientation="vertical")
+    cb.ax.tick_params(labelsize=6)
+    if pix_xy is not None and source_titles is not None and ap_radius_pix > 0:
+        _draw_source_overlays(ax, pix_xy, ap_radius_pix, source_titles, n_pix, fontsize=8)
+    if title:
+        ax.set_title(title, fontsize=10)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_image_grid(
+    images: list,
+    wcs: WCS,
+    chan_freqs_mhz: np.ndarray,
+    save_path: str,
+    suptitle: str = "",
+    pix_xy: np.ndarray | None = None,
+    ap_radius_pix: float = 0.0,
+    source_titles: list | None = None,
+) -> None:
+    """Save a grid of integrated dirty images (one per channel) as a PNG."""
+    n_chan = len(images)
+    n_cols = int(np.ceil(np.sqrt(n_chan)))
+    n_rows = int(np.ceil(n_chan / n_cols))
+    n_pix  = images[0].shape[0]
+
+    all_vals = np.concatenate([im.ravel() for im in images])
+    vmin, vmax = np.percentile(all_vals, [0.5, 99.5])
+
+    fig = plt.figure(figsize=(4 * n_cols, 4 * n_rows))
+    for i, (im, freq) in enumerate(zip(images, chan_freqs_mhz)):
+        ax = fig.add_subplot(n_rows, n_cols, i + 1, projection=wcs)
+        ax.imshow(im, cmap="gray", vmin=vmin, vmax=vmax, origin="lower")
+        ax.set_title(f"{freq:.2f} MHz", fontsize=8)
+        ax.coords.grid(True, color="blue", ls="dotted", alpha=0.5)
+        ax.coords[0].set_axislabel("")
+        ax.coords[1].set_axislabel("")
+        ax.tick_params(labelsize=6)
+        if pix_xy is not None and source_titles is not None and ap_radius_pix > 0:
+            _draw_source_overlays(ax, pix_xy, ap_radius_pix, source_titles, n_pix, fontsize=6)
+
+    for j in range(n_chan, n_rows * n_cols):
+        fig.add_subplot(n_rows, n_cols, j + 1).set_visible(False)
+
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=10)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
