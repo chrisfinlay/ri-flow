@@ -128,31 +128,36 @@ def plot_spectrogram(
     lc_per_chan: np.ndarray,
     titles: list,
     save_name: str,
+    stat_idx: int = 1,
+    noise_level: float | None = None,
 ) -> None:
-    """Plot time-frequency spectrograms from per-channel light curves.
-
-    The colour value is max(|min|, |max|) — the peak absolute flux in the aperture.
+    """Plot a time-frequency spectrogram from per-channel light curves.
 
     Parameters
     ----------
     times          : (n_times,) time in seconds from observation start
     chan_freqs_mhz : (n_chan,) channel centre frequencies in MHz
-    lc_per_chan    : (n_chan, n_sources, n_times, 3) — axis -1 is [min, mean, max]
+    lc_per_chan    : (n_chan, n_sources, n_times, 2) — axis -1 is [std, max_abs]
     titles         : source names, length n_sources
     save_name      : output PNG path
+    stat_idx       : 0 → std, 1 → max_abs
+    noise_level    : if given, drawn as a horizontal line on each colorbar
     """
+    stat_labels = {0: ("std", "Std [Jy/bm]"), 1: ("max|flux|", "max|flux| [Jy/bm]")}
+    stat_name, cbar_label = stat_labels[stat_idx]
+
     n_sources = len(titles)
-    # peak absolute flux: max(|min|, |max|) per channel/source/time
-    data = np.maximum(np.abs(lc_per_chan[:, :, :, 0]),
-                      np.abs(lc_per_chan[:, :, :, 2]))  # (n_chan, n_sources, n_times)
+    data = lc_per_chan[:, :, :, stat_idx]  # (n_chan, n_sources, n_times)
 
     fig, axes = plt.subplots(n_sources, 1, figsize=(10, 4 * n_sources), squeeze=False)
 
     for s_idx, ax in enumerate(axes[:, 0]):
         z = data[:, s_idx, :]  # (n_chan, n_times)
         pcm = ax.pcolormesh(times, chan_freqs_mhz, z, shading="nearest", cmap="inferno")
-        fig.colorbar(pcm, ax=ax, label="Flux [max|peak|] [Jy/bm]")
-        ax.set_title(titles[s_idx])
+        cb = fig.colorbar(pcm, ax=ax, label=cbar_label)
+        if noise_level is not None:
+            cb.ax.axhline(noise_level, color="cyan", linewidth=1.5, linestyle="--")
+        ax.set_title(f"{titles[s_idx]} — {stat_name}")
         ax.set_xlabel("Time [s]")
         ax.set_ylabel("Frequency [MHz]")
 
@@ -166,22 +171,20 @@ def plot_spectrum(
     lc_per_chan: np.ndarray,
     titles: list,
     save_name: str,
+    noise_level: float | None = None,
 ) -> None:
     """Plot flux spectrum (frequency vs flux) from per-channel light curves.
-
-    For each channel the per-timestep peak absolute flux is max(|min|, |max|).
-    Two curves are shown per source: the mean and max of this quantity over time.
 
     Parameters
     ----------
     chan_freqs_mhz : (n_chan,) channel centre frequencies in MHz
-    lc_per_chan    : (n_chan, n_sources, n_times, 3) — axis -1 is [min, mean, max]
+    lc_per_chan    : (n_chan, n_sources, n_times, 2) — axis -1 is [std, max_abs]
     titles         : source names, length n_sources
     save_name      : output PNG path
+    noise_level    : if given, drawn as a horizontal line on each subplot
     """
     n_sources = len(titles)
-    peak_abs = np.maximum(np.abs(lc_per_chan[:, :, :, 0]),
-                          np.abs(lc_per_chan[:, :, :, 2]))  # (n_chan, n_sources, n_times)
+    peak_abs = lc_per_chan[:, :, :, 1]      # max_abs: (n_chan, n_sources, n_times)
 
     mean_over_time = peak_abs.mean(axis=2)  # (n_chan, n_sources)
     max_over_time  = peak_abs.max(axis=2)   # (n_chan, n_sources)
@@ -191,6 +194,9 @@ def plot_spectrum(
     for s_idx, ax in enumerate(axes[:, 0]):
         ax.plot(chan_freqs_mhz, mean_over_time[:, s_idx], label="mean over time")
         ax.plot(chan_freqs_mhz, max_over_time[:, s_idx],  label="max over time")
+        if noise_level is not None:
+            ax.axhline(noise_level, color="gray", linewidth=1,
+                       linestyle="--", alpha=0.7, label="noise")
         ax.set_title(titles[s_idx])
         ax.set_xlabel("Frequency [MHz]")
         ax.set_ylabel("Flux [Jy/bm]")
@@ -202,18 +208,78 @@ def plot_spectrum(
     plt.close(fig)
 
 
-def plot_light_curves(
-    times: np.ndarray, light_curves: np.ndarray, titles: list, save_name: str
-):
+def plot_perchan_lc_grid(
+    times: np.ndarray,
+    perchan_lcs: list,
+    chan_freqs_mhz: np.ndarray,
+    titles: list,
+    save_name: str,
+    noise_levels: list | None = None,
+) -> None:
+    """Grid of light curve subplots, one per frequency channel.
 
+    Each subplot shows min/mean/max flux vs time for all sources at that channel.
+    Layout is roughly square in the number of channels.
+    """
+    n_chan = len(perchan_lcs)
+    n_cols = int(np.ceil(np.sqrt(n_chan)))
+    n_rows = int(np.ceil(n_chan / n_cols))
+
+    prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(3.5 * n_cols, 2.5 * n_rows),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    axes_flat = axes.ravel()
+
+    for i, (lc, freq_mhz) in enumerate(zip(perchan_lcs, chan_freqs_mhz)):
+        ax = axes_flat[i]
+        for s_idx, title in enumerate(titles):
+            color = prop_cycle[s_idx % len(prop_cycle)]
+            ax.plot(times, lc[s_idx, :, 1], color=color, linewidth=0.9, label=title)
+        if noise_levels is not None:
+            lbl = "noise" if i == 0 else None
+            ax.axhline(noise_levels[i], color="gray", linewidth=0.7,
+                       linestyle="--", alpha=0.7, label=lbl)
+        ax.set_title(f"{freq_mhz:.2f} MHz", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(labelsize=6)
+
+    for j in range(n_chan, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+
+    axes_flat[0].legend(fontsize=6, loc="upper right")
+
+    fig.text(0.5, 0.01, "Time [s]", ha="center", fontsize=10)
+    fig.text(0.01, 0.5, "Flux [Jy/bm]", va="center", rotation="vertical", fontsize=10)
+
+    plt.tight_layout(rect=[0.03, 0.03, 1, 1])
+    plt.savefig(save_name, dpi=150, format="png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_light_curves(
+    times: np.ndarray,
+    light_curves: np.ndarray,
+    titles: list,
+    save_name: str,
+    noise_level: float | None = None,
+):
     plt.rcParams["font.size"] = 16
     n_curves = len(titles)
 
     fig, ax = plt.subplots(n_curves, 1, figsize=(8, 6.5 * n_curves))
 
     for i in range(n_curves):
-        ax[i].plot(times, light_curves[i], label=["min", "mean", "max"])
-        # ax[i].plot(times, light_curves[i], label=["max-abs", "std", "mean"])
+        ax[i].plot(times, light_curves[i, :, 0], label="std")
+        ax[i].plot(times, light_curves[i, :, 1], label="max|flux|")
+        if noise_level is not None:
+            ax[i].axhline(noise_level, color="gray", linewidth=1,
+                          linestyle="--", alpha=0.7, label="noise")
         ax[i].legend()
         ax[i].set_title(titles[i])
         ax[i].set_ylabel("Flux [Jy/bm]")
