@@ -163,11 +163,6 @@ def _run(args):
         if key not in ["data", "image", "extract", "gif"]
     }
 
-    save_path    = os.path.join(image_path, "gifs")
-    lc_data_path = os.path.join(save_path, "lc_data")
-    os.makedirs(save_path, exist_ok=True)
-    os.makedirs(lc_data_path, exist_ok=True)
-
     print(f"MS path   : {ms_path}")
     print(f"Image path: {image_path}")
     print(f"n_pix={n_pix}, pixel_deg={pixel_deg}°")
@@ -364,6 +359,15 @@ def _run(args):
         data_col        = names[data_type]
         tab_data_suffix = prepend_suffix(args.tab_data) if tab_suffix else ""
         gif_base        = f"{data_type}{tab_suffix}{img_suffix}{gif_suffix}{tab_data_suffix}"
+
+        gifs_root    = os.path.join(image_path, "gifs")
+        tab_dir      = args.tab_suffix or ""
+        save_path    = os.path.join(gifs_root, tab_dir, data_type) if tab_dir \
+                       else os.path.join(gifs_root, data_type)
+        lc_data_path = os.path.join(save_path, "lc_data")
+        os.makedirs(save_path, exist_ok=True)
+        os.makedirs(lc_data_path, exist_ok=True)
+
         print(f"\n[3/4] Imaging data column '{data_col}' -> '{gif_base}'")
 
         t0 = _time.perf_counter()
@@ -599,12 +603,16 @@ def _run(args):
 
         # --- Per-channel light curve grid (perchan mode, default) ---
         if mode == "perchan" and not args.per_chan_lc and len(perchan_lcs) > 0:
-            grid_path = os.path.join(save_path, f"{gif_base}_perchan_lc_grid{chan_range_suffix}.png")
-            plot_perchan_lc_grid(
-                times_sec, perchan_lcs, chan_freqs / 1e6, titles, grid_path,
-                noise_levels=perchan_noise,
-            )
-            print(f"Per-channel LC grid saved as {grid_path}")
+            for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
+                grid_path = os.path.join(
+                    save_path,
+                    f"{gif_base}_perchan_lc_grid_{stat_tag}{chan_range_suffix}.png",
+                )
+                plot_perchan_lc_grid(
+                    times_sec, perchan_lcs, chan_freqs / 1e6, titles, grid_path,
+                    noise_levels=perchan_noise, stat_idx=stat_idx,
+                )
+                print(f"Per-channel LC grid ({stat_tag}) saved as {grid_path}")
 
         # --- Spectrogram + spectrum (perchan mode, more than one channel) ---
         if mode == "perchan" and len(perchan_lcs) > 1:
@@ -616,9 +624,14 @@ def _run(args):
                 plot_spectrogram(times_sec, freqs_mhz, lc_stack, titles, sp,
                                  stat_idx=stat_idx, noise_level=noise_level)
                 print(f"Spectrogram ({stat_tag}) saved as {sp}")
-            spect_path = os.path.join(save_path, f"{gif_base}_spectrum{chan_range_suffix}.png")
-            plot_spectrum(freqs_mhz, lc_stack, titles, spect_path, noise_level=noise_level)
-            print(f"Spectrum saved as {spect_path}")
+            for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
+                spect_path = os.path.join(
+                    save_path,
+                    f"{gif_base}_spectrum_{stat_tag}{chan_range_suffix}.png",
+                )
+                plot_spectrum(freqs_mhz, lc_stack, titles, spect_path,
+                              noise_level=noise_level, stat_idx=stat_idx)
+                print(f"Spectrum ({stat_tag}) saved as {spect_path}")
 
     print(f"\nTotal wall time: {_time.perf_counter() - _t_start:.2f}s")
 

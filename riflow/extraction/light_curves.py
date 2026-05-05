@@ -172,6 +172,7 @@ def plot_spectrum(
     titles: list,
     save_name: str,
     noise_level: float | None = None,
+    stat_idx: int = 1,
 ) -> None:
     """Plot flux spectrum (frequency vs flux) from per-channel light curves.
 
@@ -182,12 +183,16 @@ def plot_spectrum(
     titles         : source names, length n_sources
     save_name      : output PNG path
     noise_level    : if given, drawn as a horizontal line on each subplot
+    stat_idx       : 0 → std, 1 → max|flux|
     """
-    n_sources = len(titles)
-    peak_abs = lc_per_chan[:, :, :, 1]      # max_abs: (n_chan, n_sources, n_times)
+    stat_labels = {0: "Std [Jy/bm]", 1: "max|flux| [Jy/bm]"}
+    y_label = stat_labels[stat_idx]
 
-    mean_over_time = peak_abs.mean(axis=2)  # (n_chan, n_sources)
-    max_over_time  = peak_abs.max(axis=2)   # (n_chan, n_sources)
+    n_sources = len(titles)
+    stat_vals = lc_per_chan[:, :, :, stat_idx]  # (n_chan, n_sources, n_times)
+
+    mean_over_time = stat_vals.mean(axis=2)     # (n_chan, n_sources)
+    max_over_time  = stat_vals.max(axis=2)      # (n_chan, n_sources)
 
     fig, axes = plt.subplots(n_sources, 1, figsize=(8, 4 * n_sources), squeeze=False)
 
@@ -199,7 +204,7 @@ def plot_spectrum(
                        linestyle="--", alpha=0.7, label="noise")
         ax.set_title(titles[s_idx])
         ax.set_xlabel("Frequency [MHz]")
-        ax.set_ylabel("Flux [Jy/bm]")
+        ax.set_ylabel(y_label)
         ax.legend()
         ax.grid()
 
@@ -215,12 +220,19 @@ def plot_perchan_lc_grid(
     titles: list,
     save_name: str,
     noise_levels: list | None = None,
+    stat_idx: int = 1,
 ) -> None:
     """Grid of light curve subplots, one per frequency channel.
 
-    Each subplot shows min/mean/max flux vs time for all sources at that channel.
     Layout is roughly square in the number of channels.
+
+    Parameters
+    ----------
+    stat_idx : 0 → std, 1 → max|flux|
     """
+    stat_labels = {0: "Std [Jy/bm]", 1: "max|flux| [Jy/bm]"}
+    y_label = stat_labels[stat_idx]
+
     n_chan = len(perchan_lcs)
     n_cols = int(np.ceil(np.sqrt(n_chan)))
     n_rows = int(np.ceil(n_chan / n_cols))
@@ -240,7 +252,7 @@ def plot_perchan_lc_grid(
         ax = axes_flat[i]
         for s_idx, title in enumerate(titles):
             color = prop_cycle[s_idx % len(prop_cycle)]
-            ax.plot(times, lc[s_idx, :, 1], color=color, linewidth=0.9, label=title)
+            ax.plot(times, lc[s_idx, :, stat_idx], color=color, linewidth=0.9, label=title)
         if noise_levels is not None:
             lbl = "noise" if i == 0 else None
             ax.axhline(noise_levels[i], color="gray", linewidth=0.7,
@@ -255,7 +267,7 @@ def plot_perchan_lc_grid(
     axes_flat[0].legend(fontsize=6, loc="upper right")
 
     fig.text(0.5, 0.01, "Time [s]", ha="center", fontsize=10)
-    fig.text(0.01, 0.5, "Flux [Jy/bm]", va="center", rotation="vertical", fontsize=10)
+    fig.text(0.01, 0.5, y_label, va="center", rotation="vertical", fontsize=10)
 
     plt.tight_layout(rect=[0.03, 0.03, 1, 1])
     plt.savefig(save_name, dpi=150, format="png", bbox_inches="tight")
