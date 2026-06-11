@@ -284,19 +284,22 @@ def plot_light_curves(
     plt.rcParams["font.size"] = 16
     n_curves = len(titles)
 
-    fig, ax = plt.subplots(n_curves, 1, figsize=(8, 6.5 * n_curves))
+    # squeeze=False keeps `ax` a 2-D array even when n_curves == 1, so a single
+    # source (e.g. Fornax A only) doesn't break subscripting.
+    fig, ax = plt.subplots(n_curves, 1, figsize=(8, 6.5 * n_curves),
+                           squeeze=False)
 
     for i in range(n_curves):
-        ax[i].plot(times, light_curves[i, :, 0], label="std")
-        ax[i].plot(times, light_curves[i, :, 1], label="max|flux|")
+        ax[i, 0].plot(times, light_curves[i, :, 0], label="std")
+        ax[i, 0].plot(times, light_curves[i, :, 1], label="max|flux|")
         if noise_level is not None:
-            ax[i].axhline(noise_level, color="gray", linewidth=1,
-                          linestyle="--", alpha=0.7, label="noise")
-        ax[i].legend()
-        ax[i].set_title(titles[i])
-        ax[i].set_ylabel("Flux [Jy/bm]")
-        ax[i].set_xlabel("Time [s]")
-        ax[i].grid()
+            ax[i, 0].axhline(noise_level, color="gray", linewidth=1,
+                             linestyle="--", alpha=0.7, label="noise")
+        ax[i, 0].legend()
+        ax[i, 0].set_title(titles[i])
+        ax[i, 0].set_ylabel("Flux [Jy/bm]")
+        ax[i, 0].set_xlabel("Time [s]")
+        ax[i, 0].grid()
 
     plt.savefig(save_name, dpi=200, format="png", bbox_inches="tight")
     plt.close(fig)
