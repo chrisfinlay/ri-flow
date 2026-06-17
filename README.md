@@ -58,6 +58,7 @@ nufft-gif -c <config.yaml> [options]
 | `-g / --gif_suffix` | — | Extra string appended to all output filenames. |
 | `-ng / --no-gif` | off | Skip GIF rendering; still compute dirty images for aperture statistics, light curves, spectrograms, and integrated image plots. |
 | `-pcl / --per-chan-lc` | off | In `perchan` mode, save one light curve PNG per channel instead of the default single-grid figure. |
+| `-rp / --replot` | off | Skip the MS read and imaging entirely; regenerate the light curve, spectrogram, and spectrum plots from the previously saved `lc_data/*.npz`. Fast iteration on plot styling. Use the same `-d`/`-mo` and suffix flags as the original run so the right files are found. |
 
 **Satellite tracking**
 
@@ -117,11 +118,10 @@ gif:
 | `<base>_mfs-chan_X-Y.png` | MFS | Light curve plot (std and max\|flux\|). |
 | `<base>_perchan_image_grid_chan_X-Y_tidx_X-Y.png` | perchan | Grid of time-integrated images, one per channel, with source overlays. |
 | `<base>_chan_X-Y_tidx_X-Y_gifs/<base>_chN.gif` | perchan | Per-channel GIFs in a dedicated subdirectory. |
-| `<base>_perchan_lc_grid_chan_X-Y.png` | perchan | Grid of light curve subplots, one per channel (default). |
-| `<base>_spectrogram_std_chan_X-Y.png` | perchan | Time–frequency spectrogram (std statistic) with noise indicator. |
-| `<base>_spectrogram_maxabs_chan_X-Y.png` | perchan | Time–frequency spectrogram (max\|flux\| statistic) with noise indicator. |
-| `<base>_spectrum_chan_X-Y.png` | perchan | Frequency spectrum (mean and max over time) with noise indicator. |
-| `lc_data/<base>_light_curves.npz` | both | NumPy archive: `light_curves (n_sources, n_times, 2)` — columns are `[std, max\|flux\|]` — and scalar `noise_level`. |
+| `<base>_perchan_lc_grid_{std,maxabs}_chan_X-Y.png` | perchan | Grid of light curve subplots, one per channel, per-row y-scale (default). |
+| `<base>_spectrogram_{std,maxabs}_chan_X-Y.png` | perchan | Time–frequency spectrogram (std and max\|flux\| statistics) with noise indicator. |
+| `<base>_spectrum_{std,maxabs}_chan_X-Y.png` | perchan | Frequency spectrum (mean and max over time, NaN-safe) with noise indicator. |
+| `lc_data/<base>_light_curves.npz` | both | NumPy archive: `light_curves (n_sources, n_times, 2)` (columns `[std, max\|flux\|]`), `noise_level`, plus `times_sec`, `titles`, `chan_freq_mhz`, `chan_idx` so the file is self-contained for `--replot` and `flux-calibrate`. |
 
 ---
 
@@ -232,3 +232,92 @@ uv-redundancy -c config.yaml -d real -ch 0:27 --geom-floor
 
 Console output prints, per column, the global redundancy χ², imageable power
 fraction, and (with `--geom-floor`) the geometric-floor χ² and the non-redundancy χ².
+
+---
+
+### `flux-calibrate`
+
+Simple array-wide flux calibration from **Fornax A** — the one source common to all
+EDA2 fields — intended as an initial flux scale before TABASCAL. It derives a smooth,
+direction-independent amplitude solution `k(t, ν) = S_model_FornaxA(ν) / S_obs(t, ν)`
+from the per-channel Fornax light curves and (with `--apply`) writes a flux-scaled
+column back to the MS. It does **not** recover per-antenna gains/phases (the rest of
+the field is unmodelled); it only fixes the overall flux scale vs time and frequency.
+
+The solution is modelled as **at most linear in time and frequency** and fit robustly
+(iterative σ-clipping), since the underlying gain is expected to be smooth — rapid
+variation is treated as noise/artefacts. Fornax samples are screened for satellite
+contamination first (out-of-FOV, bright-satellite aperture, Fornax spikes, optional
+TLE proximity). If too little survives, or satellites dominate the band, the data is
+reported as **uncalibratable**.
+
+**Prerequisite:** run `nufft-gif -mo perchan -d <type>` first so the per-channel
+`lc_data/*.npz` (with metadata) exist. The calibration is derived from those, not from
+the MS visibilities directly; the MS is read only for channel frequencies, per-row
+`TIME`, and the source column at apply time.
+
+**Usage**
+
+```bash
+# derive + diagnose only (no MS write); uses the placeholder Fornax model
+flux-calibrate -c <config.yaml> -d real
+
+# supply a real Fornax A spectrum and flag times where a satellite nears Fornax
+flux-calibrate -c <config.yaml> -d real \
+    --fornax-flux 750 --fornax-freq 154 --fornax-index -0.77 --tle-flag
+
+# write REAL_DATA × k(t,ν) -> REAL_DATA_FLUXCAL
+flux-calibrate -c <config.yaml> -d real --apply
+```
+
+**Fornax A model** (log-polynomial `log10 S = Σ c_i (log10(ν/ν_ref))^i`)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--fornax-flux` | `750` | Fornax A flux [Jy] at `--fornax-freq`. **Approximate placeholder — replace with a literature spectrum** (e.g. McKinley et al. 2015/2020). |
+| `--fornax-freq` | `154` | Reference frequency [MHz] for `--fornax-flux`. |
+| `--fornax-index` | `-0.77` | Spectral index α, `S ∝ ν^α`. |
+| `--fornax-logpoly` | — | Explicit comma-separated coeffs `c0,c1,c2,...`; overrides flux/index. |
+
+**Smooth solution + screening**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--time-order` | `1` | Order of `k` in time (`0`=constant, `1`=linear). Use `0` if the Fornax level shows a strong (beam) trend in time. |
+| `--freq-order` | `1` | Order of `k` in frequency (`0`=constant, `1`=linear). |
+| `--fit-nsigma` | `5` | σ-clip threshold for the robust plane fit. |
+| `--stat` | `maxabs` | Aperture statistic to use (`maxabs` or `std`). |
+| `--sat-factor` | `1.5` | Flag a sample if any satellite aperture \|flux\| exceeds this × the channel Fornax median. `0` disables. |
+| `--spike-nsigma` | `5` | Flag Fornax samples above median + N·MAD per channel. |
+| `--min-clean` | `10` | Min clean time samples for a channel to count as usable. |
+| `--min-good-frac` | `0.5` | Abort as uncalibratable if fewer than this fraction of channels are usable. |
+| `--allow-uncalibratable` | off | Warn instead of aborting when the data looks uncalibratable. |
+
+**TLE proximity flagging**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tle-flag` | off | Flag times where a satellite is within `--tle-radius-deg` of Fornax A (propagates TLEs; needs Space-Track + NORAD IDs). |
+| `--tle-radius-deg` | `5` | Angular radius [deg] for TLE proximity flagging. |
+| `-st / --spacetrack-path` | from config | Space-Track login YAML. |
+| `-n / --norad-ids` | from config | Extra NORAD IDs (comma-separated). |
+
+**Application**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--apply` | off | Write the flux-scaled column back to the MS. |
+| `--source-col` | data-type's column | MS column to scale (e.g. `REAL_DATA`). |
+| `--out-col` | `<SOURCE_COL>_FLUXCAL` | Output column name (created if missing; source column untouched). |
+| `--chunk` | `50000` | Row chunk size when applying. |
+| `-dr / --dry-run` | off | With `--apply`, report what would be written without modifying the MS. |
+
+Common selection flags (`-d`, `-ms`, `-i`, `--lc-dir`, `-tsx`, `-img`, `-g`, `-td`)
+match `nufft-gif` so the right `lc_data` is located.
+
+**Output files** (written next to `lc_data`, i.e. `<image_path>/gifs/[<tab>/]<type>/`)
+
+| File | Description |
+|------|-------------|
+| `<base>_flux_scale.npz` | Solution archive: `freq_mhz`, `model_jy`, per-channel `fornax_med`/`scale_ch`/`good`/`n_clean`/`n_sat`/`n_spike`, `times_sec`, `tle_flag`, and the plane coefficients (`coef_*`, `time_order`, `freq_order`, `ref_freq_mhz`, `logpoly`). |
+| `<base>_flux_scale.png` | 4-panel diagnostic: apparent flux vs ν, `k` vs ν with the fit, `k` vs time with the fit (TLE-flagged times marked), and the fit-residual histogram. |
