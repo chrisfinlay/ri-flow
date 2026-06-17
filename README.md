@@ -283,6 +283,7 @@ flux-calibrate -c <config.yaml> -d real --apply
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `-ch / --channels` | all | Numpy-style channel selection for the **fit only** (e.g. `3:30`, `0,4,8`). Use to exclude band-edge roll-off the linear model can't capture. The smooth solution is still applied (extrapolated) to **all** channels on `--apply`, so edges get an approximate scale for a later bandpass step or exclusion. |
 | `--time-order` | `1` | Order of `k` in time (`0`=constant, `1`=linear). Use `0` if the Fornax level shows a strong (beam) trend in time. |
 | `--freq-order` | `1` | Order of `k` in frequency (`0`=constant, `1`=linear). |
 | `--fit-nsigma` | `5` | σ-clip threshold for the robust plane fit. |
@@ -319,5 +320,5 @@ match `nufft-gif` so the right `lc_data` is located.
 
 | File | Description |
 |------|-------------|
-| `<base>_flux_scale.npz` | Solution archive: `freq_mhz`, `model_jy`, per-channel `fornax_med`/`scale_ch`/`good`/`n_clean`/`n_sat`/`n_spike`, `times_sec`, `tle_flag`, and the plane coefficients (`coef_*`, `time_order`, `freq_order`, `ref_freq_mhz`, `logpoly`). |
+| `<base>_flux_scale.npz` | Solution archive: `freq_mhz`, `model_jy`, per-channel `fornax_med`/`scale_ch`/`good`/`selected`/`used`/`n_clean`/`n_sat`/`n_spike`, `times_sec`, `tle_flag`, and the plane coefficients (`coef_*`, `time_order`, `freq_order`, `ref_freq_mhz`, `logpoly`). |
 | `<base>_flux_scale.png` | 4-panel diagnostic: apparent flux vs ν, `k` vs ν with the fit, `k` vs time with the fit (TLE-flagged times marked), and the fit-residual histogram. |

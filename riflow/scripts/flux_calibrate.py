@@ -82,6 +82,7 @@ Usage
 import argparse
 import glob
 import os
+import warnings
 
 
 def _fornax_model_jy(freq_mhz, logpoly, ref_freq_mhz):
@@ -99,6 +100,22 @@ def _mad_sigma(x):
     med = float(np.median(x))
     sig = 1.4826 * float(np.median(np.abs(x - med)))
     return med, sig
+
+
+def _parse_channels(sel, n):
+    """Numpy-style channel selection -> sorted unique indices in [0, n).
+    Supports ':', 'a:b', 'a:b:s', and comma lists like '0,4,8'."""
+    import numpy as np
+    sel = (sel or ":").strip()
+    if "," in sel:
+        out = set()
+        for part in sel.split(","):
+            out.update(_parse_channels(part, n).tolist())
+        return np.array(sorted(out))
+    if ":" in sel:
+        parts = sel.split(":")
+        return np.arange(n)[slice(*[int(p) if p.strip() else None for p in parts])]
+    return np.array([int(sel)])
 
 
 def _channel_flags(fornax_lc, sat_lc, sat_factor, spike_nsigma):
@@ -228,6 +245,12 @@ def main():
     p.add_argument("-img", "--img_suffix", default=None, help="Image param suffix.")
     p.add_argument("-g", "--gif_suffix", default=None, help="Extra GIF suffix.")
     p.add_argument("-td", "--tab_data", default="map", help="Zarr result type.")
+    p.add_argument("-ch", "--channels", default=":",
+                   help="Numpy-style channel selection for the FIT only (e.g. ':', '3:30', "
+                        "'0,4,8'). Use to exclude band-edge roll-off the linear model can't "
+                        "capture. The smooth solution is still applied (extrapolated) to ALL "
+                        "channels on --apply, so edges get an approximate scale that can be "
+                        "refined by a later bandpass step or excluded.")
 
     # --- Fornax A spectral model ---
     p.add_argument("--fornax-flux", type=float, default=750.0,
@@ -416,10 +439,19 @@ def main():
     n_clean = clean.sum(axis=1)
     good    = n_clean >= args.min_clean      # channels with enough clean samples
 
-    # --- robust plane fit k(t, ν) over all clean samples ---
+    # channel selection (e.g. exclude band-edge roll-off the linear model can't fit)
+    sel_set  = set(_parse_channels(args.channels, int(ch_hi.max()) + 1).tolist())
+    selected = np.array([lo in sel_set for lo in ch_lo])
+    use      = good & selected               # channels used in the fit
+    if not selected.all():
+        excl = [int(c) for c in ch_lo[~selected]]
+        print(f"\nChannel selection '{args.channels}': fitting {selected.sum()}/{n_chan} "
+              f"channels; excluding {excl} from the fit (still applied via the smooth model)")
+
+    # --- robust plane fit k(t, ν) over selected, clean samples ---
     with np.errstate(divide="ignore", invalid="ignore"):
         K = model_jy[:, None] / FOR          # (n_chan, n_times)
-    fit_mask = clean & np.isfinite(K) & good[:, None]
+    fit_mask = clean & np.isfinite(K) & use[:, None]
     ci, ti   = np.where(fit_mask)
     if ci.size < 4:
         raise SystemExit(f"Only {ci.size} clean samples — cannot fit a calibration.")
@@ -430,9 +462,14 @@ def main():
     with np.errstate(divide="ignore", invalid="ignore"):
         scale_ch = model_jy / fornax_med
 
-    print(f"\nPer-channel summary ({good.sum()}/{n_chan} channels usable):")
+    print(f"\nPer-channel summary ({use.sum()}/{n_chan} channels used in fit):")
     for i in range(n_chan):
-        note = "" if good[i] else f"  SKIP (clean {n_clean[i]} < {args.min_clean})"
+        if not selected[i]:
+            note = "  EXCL (outside -ch)"
+        elif not good[i]:
+            note = f"  SKIP (clean {n_clean[i]} < {args.min_clean})"
+        else:
+            note = ""
         fm = f"{fornax_med[i]:8.3g}" if np.isfinite(fornax_med[i]) else "     nan"
         print(f"  ch{ch_lo[i]:>3}-{ch_hi[i]:<3} {freqs[i]:8.3f} MHz | "
               f"Fornax_med={fm} | k≈{scale_ch[i]:7.4g} | clean={n_clean[i]:3d} "
@@ -452,14 +489,16 @@ def main():
           f"(σ-clipped {coef['n_pts']-coef['n_used']}); residual scatter "
           f"{rsig/k_mid*100:.1f}% of k")
 
-    # uncalibratable: too few usable channels, or satellites dominate Fornax
-    good_frac = good.sum() / max(n_chan, 1)
+    # uncalibratable: too few usable channels (within the selection), or
+    # satellites dominate Fornax
+    n_sel     = max(int(selected.sum()), 1)
+    good_frac = use.sum() / n_sel
     with np.errstate(divide="ignore", invalid="ignore"):
-        dominance = np.nanmedian((sat_level / fornax_med)[good]) if good.any() else np.inf
-    print(f"\nUsable channels: {good.sum()}/{n_chan} ({good_frac:.0%}) | "
-          f"median satellite/Fornax level on usable channels: {dominance:.2f}")
+        dominance = np.nanmedian((sat_level / fornax_med)[use]) if use.any() else np.inf
+    print(f"\nChannels used: {use.sum()}/{n_sel} selected ({good_frac:.0%}) | "
+          f"median satellite/Fornax level on used channels: {dominance:.2f}")
     if (good_frac < args.min_good_frac) or (np.isfinite(dominance) and dominance > 1.0):
-        msg = (f"UNCALIBRATABLE: {good.sum()}/{n_chan} channels usable "
+        msg = (f"UNCALIBRATABLE: {use.sum()}/{n_sel} selected channels usable "
                f"({good_frac:.0%}; need ≥{args.min_good_frac:.0%}) and satellites sit "
                f"at ~{dominance:.1f}× Fornax — satellites likely dominate the band.")
         if args.allow_uncalibratable:
@@ -472,7 +511,8 @@ def main():
     os.makedirs(save_path, exist_ok=True)
     scale_npz = os.path.join(save_path, f"{gif_base}_flux_scale.npz")
     np.savez(scale_npz, freq_mhz=freqs, chan_lo=ch_lo, chan_hi=ch_hi,
-             fornax_med=fornax_med, model_jy=model_jy, scale_ch=scale_ch, good=good,
+             fornax_med=fornax_med, model_jy=model_jy, scale_ch=scale_ch,
+             good=good, selected=selected, used=use,
              n_clean=n_clean, n_sat=n_sat, n_spike=n_spike, sat_level=sat_level,
              times_sec=times_sec, tle_flag=tle_flag,
              coef_c0=coef["c0"], coef_ct=coef["ct"], coef_cnu=coef["cnu"],
@@ -485,23 +525,24 @@ def main():
     fig, ax = plt.subplots(2, 2, figsize=(13, 9))
     # (0,0) apparent Fornax median vs freq + model
     a = ax[0, 0]
-    a.plot(freqs[good], fornax_med[good], "o", label="Fornax median (clean)")
-    a.plot(freqs[~good], fornax_med[~good], "rx", ms=8, label="unusable channel")
+    a.plot(freqs[use], fornax_med[use], "o", label="Fornax median (used)")
+    a.plot(freqs[~use], fornax_med[~use], "rx", ms=8, label="excluded/unusable")
     a.set_yscale("log"); a.set_xlabel("Frequency [MHz]")
     a.set_ylabel("apparent flux [data units]"); a.legend(); a.grid(True, alpha=0.3)
     a.set_title("Fornax A apparent flux")
     # (0,1) k vs freq: per-channel + fitted plane at t_mid
     a = ax[0, 1]
-    a.plot(freqs[good], scale_ch[good], "o", label="per-channel k")
-    a.plot(freqs[~good], scale_ch[~good], "rx", ms=8, label="unusable")
-    a.plot(freqs, _plane_predict(coef, t_mid, freqs), "-", color="C2",
+    a.plot(freqs[use], scale_ch[use], "o", label="per-channel k (used)")
+    a.plot(freqs[~use], scale_ch[~use], "rx", ms=8, label="excluded/unusable")
+    a.plot(freqs[use], _plane_predict(coef, t_mid, freqs[use]), "-", color="C2",
            label="fit k(ν, t=mid)")
     a.set_xlabel("Frequency [MHz]"); a.set_ylabel("scale k"); a.legend(); a.grid(True, alpha=0.3)
     a.set_title("Calibration vs frequency")
-    # (1,0) k vs time: median over channels + fitted plane at nu_mid
+    # (1,0) k vs time: median over used channels + fitted plane at nu_mid
     a = ax[1, 0]
-    with np.errstate(invalid="ignore"):
-        Kt = np.where(clean & good[:, None], K, np.nan)
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN time columns
+        Kt = np.where(clean & use[:, None], K, np.nan)
         kt_med = np.nanmedian(Kt, axis=0)
     a.plot(times_sec, kt_med, ".", ms=3, color="0.5", label="median k over chans")
     if tle_flag.any():
@@ -538,6 +579,12 @@ def main():
     print(f"\nApply: {source_col} × k(t, ν) → {out_col} in {ms_path}")
     print(f"  band scale @t=mid: [{k_band.min():.4g}, {k_band.max():.4g}] over "
           f"{all_freq_mhz.size} channels; time order={args.time_order}")
+    fit_lo, fit_hi = float(freqs[use].min()), float(freqs[use].max())
+    n_extrap = int((all_freq_mhz < fit_lo).sum() + (all_freq_mhz > fit_hi).sum())
+    if n_extrap:
+        print(f"  NOTE: {n_extrap} channel(s) outside the fitted band "
+              f"[{fit_lo:.3f}, {fit_hi:.3f}] MHz get the EXTRAPOLATED plane value "
+              f"(approximate — refine with a later bandpass step or exclude).")
     if (k_band <= 0).any():
         print("  WARNING: fitted k(ν) is non-positive in part of the band — "
               "check the model / contamination.")
