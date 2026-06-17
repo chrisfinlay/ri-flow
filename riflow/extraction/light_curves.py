@@ -191,8 +191,15 @@ def plot_spectrum(
     n_sources = len(titles)
     stat_vals = lc_per_chan[:, :, :, stat_idx]  # (n_chan, n_sources, n_times)
 
-    mean_over_time = stat_vals.mean(axis=2)     # (n_chan, n_sources)
-    max_over_time  = stat_vals.max(axis=2)      # (n_chan, n_sources)
+    # Light curves are NaN whenever the source falls outside the field of view,
+    # so reduce over time with NaN-aware ops. A channel where the source is
+    # never visible reduces to NaN (an empty slice), which matplotlib simply
+    # leaves as a gap in the line. Suppress the "all-NaN slice" warning those
+    # channels would otherwise raise.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        mean_over_time = np.nanmean(stat_vals, axis=2)  # (n_chan, n_sources)
+        max_over_time  = np.nanmax(stat_vals, axis=2)   # (n_chan, n_sources)
 
     fig, axes = plt.subplots(n_sources, 1, figsize=(8, 4 * n_sources), squeeze=False)
 
@@ -244,7 +251,7 @@ def plot_perchan_lc_grid(
         figsize=(3.5 * n_cols, 2.5 * n_rows),
         squeeze=False,
         sharex=True,
-        sharey=True,
+        sharey="row",  # per-row y scale: fluxes vary widely between channels
     )
     axes_flat = axes.ravel()
 
@@ -299,6 +306,10 @@ def plot_light_curves(
         ax[i, 0].set_title(titles[i])
         ax[i, 0].set_ylabel("Flux [Jy/bm]")
         ax[i, 0].set_xlabel("Time [s]")
+        # Pin the x-axis to the full time range; otherwise matplotlib autoscales
+        # to the finite (in-FOV) samples and each curve starts/ends at a
+        # different time wherever the source leaves the field of view.
+        ax[i, 0].set_xlim(times[0], times[-1])
         ax[i, 0].grid()
 
     plt.savefig(save_name, dpi=200, format="png", bbox_inches="tight")

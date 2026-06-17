@@ -72,8 +72,16 @@ def main():
                              "the total track length (e.g. 0.1 → shift by 10%% of timesteps). "
                              "The light curve is shifted back after extraction so it aligns in "
                              "time with the original satellite track.")
+    parser.add_argument("-rp", "--replot", action="store_true", default=False,
+                        help="Skip MS reading and imaging entirely; regenerate the light "
+                             "curve, spectrogram and spectrum plots from previously saved "
+                             "lc_data/*.npz files.  Useful for iterating on plot styling "
+                             "without re-running the (slow) imaging.")
     args = parser.parse_args()
-    _run(args)
+    if args.replot:
+        _replot(args)
+    else:
+        _run(args)
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +575,10 @@ def _run(args):
                 os.path.join(lc_data_path, f"{run_gif_name}_light_curves.npz"),
                 light_curves=light_curves,
                 noise_level=np.array(noise_level),
+                times_sec=times_sec,
+                titles=np.array(titles),
+                chan_freq_mhz=chan_freqs[run_chans] / 1e6,
+                chan_idx=chan_sel[run_chans],
             )
             if mode == "mfs" or args.per_chan_lc:
                 plot_light_curves(
@@ -634,6 +646,148 @@ def _run(args):
                 print(f"Spectrum ({stat_tag}) saved as {spect_path}")
 
     print(f"\nTotal wall time: {_time.perf_counter() - _t_start:.2f}s")
+
+
+# ---------------------------------------------------------------------------
+# Replot — regenerate plots from saved lc_data/*.npz, no MS / imaging needed
+# ---------------------------------------------------------------------------
+
+def _replot(args):
+    import time as _time
+    _t_start = _time.perf_counter()
+
+    import glob
+    import re
+    import numpy as np
+
+    import matplotlib
+    matplotlib.use("Agg")  # no display; light_curves imports pyplot at import time
+
+    from riflow import load_config
+    from riflow.config import prepend_suffix
+    from riflow.extraction.light_curves import (
+        plot_light_curves, plot_perchan_lc_grid, plot_spectrogram, plot_spectrum,
+    )
+
+    config     = load_config(args.config_path)
+    image_path = os.path.abspath(args.image_path or config["data"]["image_path"])
+
+    img_params = config["image"]["params"]
+    mode       = args.mode or str(img_params.get("mode", "mfs"))
+
+    tab_suffix = prepend_suffix(args.tab_suffix)
+    img_suffix = prepend_suffix(args.img_suffix)
+    gif_suffix = prepend_suffix(args.gif_suffix)
+
+    data_types = args.data_types.split(",")
+
+    for data_type in data_types:
+        tab_data_suffix = prepend_suffix(args.tab_data) if tab_suffix else ""
+        gif_base        = f"{data_type}{tab_suffix}{img_suffix}{gif_suffix}{tab_data_suffix}"
+
+        gifs_root    = os.path.join(image_path, "gifs")
+        tab_dir      = args.tab_suffix or ""
+        save_path    = os.path.join(gifs_root, tab_dir, data_type) if tab_dir \
+                       else os.path.join(gifs_root, data_type)
+        lc_data_path = os.path.join(save_path, "lc_data")
+
+        if not os.path.isdir(lc_data_path):
+            print(f"\n[replot] No lc_data directory at {lc_data_path}; skipping {data_type}.")
+            continue
+
+        print(f"\n[replot] {data_type} -> {gif_base} (mode={mode})")
+
+        # --- MFS: a single combined light curve plot ---
+        if mode == "mfs":
+            files = sorted(glob.glob(
+                os.path.join(lc_data_path, f"{gif_base}_mfs-chan_*_light_curves.npz")
+            ))
+            if not files:
+                print(f"  No MFS npz found in {lc_data_path}; skipping.")
+                continue
+            for f in files:
+                d            = np.load(f, allow_pickle=True)
+                titles       = [str(t) for t in d["titles"]]
+                run_gif_name = os.path.basename(f).replace("_light_curves.npz", "")
+                out          = os.path.join(save_path, f"{run_gif_name}.png")
+                plot_light_curves(
+                    d["times_sec"], d["light_curves"], titles, out,
+                    noise_level=float(d["noise_level"]),
+                )
+                print(f"  Light curve replotted: {out}")
+            continue
+
+        # --- perchan: gather all channels, sorted by channel index ---
+        entries = []
+        for f in glob.glob(os.path.join(lc_data_path, f"{gif_base}_ch*_light_curves.npz")):
+            m = re.search(r"_ch(\d+)_light_curves\.npz$", os.path.basename(f))
+            if m:
+                entries.append((int(m.group(1)), f))
+        entries.sort()
+
+        if not entries:
+            print(f"  No perchan npz found in {lc_data_path}; skipping.")
+            continue
+
+        perchan_lcs:   list[np.ndarray] = []
+        perchan_noise: list[float]      = []
+        freqs_mhz:     list[float]      = []
+        chan_idxs:     list[int]        = []
+        titles    = None
+        times_sec = None
+        for idx, f in entries:
+            d = np.load(f, allow_pickle=True)
+            perchan_lcs.append(d["light_curves"])
+            perchan_noise.append(float(d["noise_level"]))
+            freqs_mhz.append(float(np.atleast_1d(d["chan_freq_mhz"])[0]))
+            chan_idxs.append(idx)
+            if titles is None:
+                titles    = [str(t) for t in d["titles"]]
+                times_sec = d["times_sec"]
+
+        freqs_mhz         = np.array(freqs_mhz)
+        chan_range_suffix = f"_chan_{chan_idxs[0]}-{chan_idxs[-1]}"
+
+        # Per-channel individual light curve plots (original behaviour)
+        if args.per_chan_lc:
+            for (idx, f), lc, nl in zip(entries, perchan_lcs, perchan_noise):
+                run_gif_name = os.path.basename(f).replace("_light_curves.npz", "")
+                out          = os.path.join(save_path, f"{run_gif_name}.png")
+                plot_light_curves(times_sec, lc, titles, out, noise_level=nl)
+                print(f"  Light curve replotted: {out}")
+        # Per-channel light curve grid (default)
+        elif len(perchan_lcs) > 0:
+            for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
+                grid_path = os.path.join(
+                    save_path,
+                    f"{gif_base}_perchan_lc_grid_{stat_tag}{chan_range_suffix}.png",
+                )
+                plot_perchan_lc_grid(
+                    times_sec, perchan_lcs, freqs_mhz, titles, grid_path,
+                    noise_levels=perchan_noise, stat_idx=stat_idx,
+                )
+                print(f"  Per-channel LC grid ({stat_tag}) replotted: {grid_path}")
+
+        # Spectrogram + spectrum (needs more than one channel)
+        if len(perchan_lcs) > 1:
+            lc_stack    = np.stack(perchan_lcs)
+            noise_level = float(np.median(perchan_noise))
+            for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
+                sp = os.path.join(
+                    save_path, f"{gif_base}_spectrogram_{stat_tag}{chan_range_suffix}.png"
+                )
+                plot_spectrogram(times_sec, freqs_mhz, lc_stack, titles, sp,
+                                 stat_idx=stat_idx, noise_level=noise_level)
+                print(f"  Spectrogram ({stat_tag}) replotted: {sp}")
+            for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
+                spect_path = os.path.join(
+                    save_path, f"{gif_base}_spectrum_{stat_tag}{chan_range_suffix}.png"
+                )
+                plot_spectrum(freqs_mhz, lc_stack, titles, spect_path,
+                              noise_level=noise_level, stat_idx=stat_idx)
+                print(f"  Spectrum ({stat_tag}) replotted: {spect_path}")
+
+    print(f"\nReplot wall time: {_time.perf_counter() - _t_start:.2f}s")
 
 
 if __name__ == "__main__":
