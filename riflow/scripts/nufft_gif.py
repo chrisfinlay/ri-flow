@@ -66,6 +66,44 @@ def main():
     parser.add_argument("-tr", "--time-range", default=None,
                         help="Time index selection for the integrated image plot, numpy-style "
                              "(e.g. ':', '0:50', '10:60', '::2'). Default: all timesteps.")
+    parser.add_argument("-tp", "--time-proj", default="mean",
+                        choices=["mean", "max", "meanmed"],
+                        help="How to collapse the per-timestep images into the single "
+                             "integrated image: 'mean' — average over the time axis "
+                             "(default); 'max' — per-pixel maximum over the time axis "
+                             "(peak-hold, useful for highlighting moving sources); "
+                             "'meanmed' — per-pixel (mean − median) over the time axis "
+                             "(suppresses the static sky, leaving transient/moving signal). "
+                             "'max' is tagged '_tmax' and 'meanmed' '_tmeanmed' so they "
+                             "never overwrite the mean image.")
+    parser.add_argument("-nm", "--no-markers", action="store_true", default=False,
+                        help="Do not draw source markers (satellite track dots/labels and "
+                             "the Fornax aperture circle) on the integrated image / image "
+                             "grid.  Light-curve extraction is unaffected.")
+    parser.add_argument("-cs", "--cmap-scale", default="linear",
+                        choices=["linear", "sqrt", "power", "log", "asinh", "symlog"],
+                        help="Colourbar stretch for the saved integrated image / grid: "
+                             "'linear' (default); 'sqrt'/'power' compress bright pixels so "
+                             "faint satellite streaks come up; 'log' for high dynamic range; "
+                             "'asinh' keeps near-zero structure; 'symlog' is symmetric about "
+                             "0 (best for the signed 'meanmed' projection).")
+    parser.add_argument("-cm", "--cmap", default="gray",
+                        help="Matplotlib colormap for the saved image / grid (default 'gray'; "
+                             "try 'inferno', 'viridis', 'magma' to pull out faint streaks).")
+    parser.add_argument("-pc", "--pct-clip", default="0.5,99.5",
+                        help="Lower,upper percentile clip for the colour scale, e.g. "
+                             "'0.5,99.5' (default) or '50,99.9' to stretch harder onto faint "
+                             "features.")
+    parser.add_argument("-ts", "--track-style", default="capsule",
+                        choices=["dots", "circles", "capsule"],
+                        help="How to mark satellite tracks on the saved integrated image / "
+                             "grid: 'capsule' (one curved tube following the arc of the "
+                             "track, default); 'circles' (open aperture-radius circle per "
+                             "timestep); 'dots' (filled dot per timestep, the original "
+                             "behaviour). 'capsule' uses only a thin border so the streak "
+                             "stays visible inside — useful for flagging faint secondary "
+                             "tracks without obscuring them. It needs a multi-timestep "
+                             "track and falls back to 'dots' for a single-timestep image.")
     parser.add_argument("-fs", "--frame-shift", type=float, default=None,
                         help="Add a time-shifted copy of each satellite track as a background "
                              "sky reference.  Value in (-1, 1) sets the shift as a fraction of "
@@ -484,7 +522,13 @@ def _run(args):
 
 
             # --- Integrated image over selected time range ---
-            integrated_im = np.mean(np.stack([images[t] for t in time_sel]), axis=0)
+            time_stack = np.stack([images[t] for t in time_sel])
+            if args.time_proj == "max":
+                integrated_im = np.max(time_stack, axis=0)
+            elif args.time_proj == "meanmed":
+                integrated_im = np.mean(time_stack, axis=0) - np.median(time_stack, axis=0)
+            else:
+                integrated_im = np.mean(time_stack, axis=0)
             perchan_images.append(integrated_im)
 
             # --- Extract light curves + render GIF ---
@@ -592,24 +636,42 @@ def _run(args):
 
 
         # --- Integrated image plot(s) ---
+        # Tag non-mean projections so they don't overwrite the mean image.
+        proj_suffix = {"mean": "", "max": "_tmax", "meanmed": "_tmeanmed"}[args.time_proj]
+        proj_label  = {"mean": "mean", "max": "max-projection",
+                       "meanmed": "mean − median"}[args.time_proj]
+        # Optionally suppress source overlays on the saved image.
+        marker_xy     = None if args.no_markers else pix_xy_ref
+        marker_titles = None if args.no_markers else titles
+        marker_radius = 0.0 if args.no_markers else ap_radius_pix_ref
+        pct_clip = tuple(float(x) for x in args.pct_clip.split(","))
+        assert len(pct_clip) == 2, "--pct-clip must be 'lo,hi'"
         if mode == "mfs":
             img_path = os.path.join(
                 save_path,
-                f"{gif_base}_mfs-chan_{chan_sel[0]}-{chan_sel[-1]}{time_range_suffix}_image.png",
+                f"{gif_base}_mfs-chan_{chan_sel[0]}-{chan_sel[-1]}"
+                f"{time_range_suffix}{proj_suffix}_image.png",
             )
             _save_image_png(
                 perchan_images[0], wcs_ref, img_path,
-                pix_xy=pix_xy_ref, ap_radius_pix=ap_radius_pix_ref, source_titles=titles,
+                title=f"{gif_base} ({proj_label})",
+                pix_xy=marker_xy, ap_radius_pix=marker_radius, source_titles=marker_titles,
+                scale=args.cmap_scale, cmap=args.cmap, pct=pct_clip,
+                track_style=args.track_style,
             )
             print(f"Integrated image saved as {img_path}")
         else:
             img_grid_path = os.path.join(
                 save_path,
-                f"{gif_base}_perchan_image_grid{chan_range_suffix}{time_range_suffix}.png",
+                f"{gif_base}_perchan_image_grid{chan_range_suffix}"
+                f"{time_range_suffix}{proj_suffix}.png",
             )
             _save_image_grid(
                 perchan_images, wcs_ref, chan_freqs / 1e6, img_grid_path,
-                pix_xy=pix_xy_ref, ap_radius_pix=ap_radius_pix_ref, source_titles=titles,
+                suptitle=f"{gif_base} ({proj_label})",
+                pix_xy=marker_xy, ap_radius_pix=marker_radius, source_titles=marker_titles,
+                scale=args.cmap_scale, cmap=args.cmap, pct=pct_clip,
+                track_style=args.track_style,
             )
             print(f"Perchan image grid saved as {img_grid_path}")
 
