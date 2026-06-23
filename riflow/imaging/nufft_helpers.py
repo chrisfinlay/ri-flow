@@ -7,11 +7,64 @@ from jax_finufft import nufft1
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Polygon
+
+from matplotlib import colors as mcolors
 
 from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 from astropy.wcs.utils import proj_plane_pixel_scales
+
+
+def _build_norm(data: np.ndarray, scale: str, pct_lo: float, pct_hi: float):
+    """Build a matplotlib Normalize for a dirty image.
+
+    scale:
+      'linear' — straight percentile clip (default).
+      'sqrt'   — PowerNorm(gamma=0.5); compresses bright pixels so faint
+                 streaks come up. Negatives are clipped to 0.
+      'power'  — PowerNorm(gamma=0.25); harder version of sqrt.
+      'log'    — LogNorm; vmin is the (pct_lo)th percentile of positive pixels.
+      'asinh'  — AsinhNorm; like log near bright, linear near zero (keeps
+                 signed/near-zero structure). Falls back to linear pre-mpl-3.5.
+      'symlog' — SymLogNorm, symmetric about 0; best for signed images such as
+                 the `meanmed` (mean − median) projection.
+
+    pct_lo/pct_hi set the clip percentiles (e.g. 0.5/99.5).
+    """
+    finite = data[np.isfinite(data)]
+    vmin, vmax = np.percentile(finite, [pct_lo, pct_hi])
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+
+    if scale == "linear":
+        return mcolors.Normalize(vmin=vmin, vmax=vmax)
+    if scale == "sqrt":
+        return mcolors.PowerNorm(gamma=0.5, vmin=max(vmin, 0.0), vmax=vmax)
+    if scale == "power":
+        return mcolors.PowerNorm(gamma=0.25, vmin=max(vmin, 0.0), vmax=vmax)
+    if scale == "log":
+        pos = finite[finite > 0]
+        lo = np.percentile(pos, pct_lo) if pos.size else vmax * 1e-3
+        if not (lo > 0):
+            lo = (vmax if vmax > 0 else 1.0) * 1e-3
+        return mcolors.LogNorm(vmin=lo, vmax=max(vmax, lo * 10))
+    if scale == "asinh":
+        lw = float(np.percentile(np.abs(finite), 50))
+        if lw <= 0:
+            lw = (vmax - vmin) * 0.05 or 1.0
+        try:
+            return mcolors.AsinhNorm(linear_width=lw, vmin=vmin, vmax=vmax)
+        except AttributeError:  # matplotlib < 3.5
+            return mcolors.Normalize(vmin=vmin, vmax=vmax)
+    if scale == "symlog":
+        amax = float(np.percentile(np.abs(finite), pct_hi))
+        if amax <= 0:
+            amax = 1e-6
+        linthresh = float(np.percentile(np.abs(finite), 50))
+        linthresh = max(linthresh, amax * 1e-3)
+        return mcolors.SymLogNorm(linthresh=linthresh, vmin=-amax, vmax=amax)
+    raise ValueError(f"Unknown cmap scale '{scale}'")
 
 
 def _parse_pixel_deg(scale_str: str) -> float:
@@ -212,6 +265,48 @@ def _source_pixel_xy(
     return pix
 
 
+def _track_outline(pts: np.ndarray, half_width: float) -> np.ndarray | None:
+    """Curved-capsule polygon outlining a satellite track.
+
+    The track points are already time-ordered, so they form the centreline
+    directly: it is offset by ±half_width along the local normal and closed
+    with a semicircular cap at each end, giving a rounded tube that follows the
+    arc of the track.
+
+    pts : (n_sel, 2) time-ordered pixel positions along the track.
+    half_width : perpendicular half-width of the tube (pixels).
+
+    Returns (N, 2) closed-polygon vertices, or None if the track is degenerate.
+    """
+    p = np.asarray(pts, dtype=float)
+    p = p[np.all(np.isfinite(p), axis=1)]
+    # Drop consecutive duplicates so tangents are well defined.
+    if len(p) >= 2:
+        keep = np.concatenate([[True], np.any(np.diff(p, axis=0) != 0, axis=1)])
+        p = p[keep]
+    if len(p) < 2:
+        return None
+
+    # Local unit tangent (centred differences) and left-hand normal.
+    tang = np.gradient(p, axis=0)
+    norm = np.linalg.norm(tang, axis=1, keepdims=True)
+    tang = tang / np.where(norm > 0, norm, 1.0)
+    nrm = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+
+    left  = p + half_width * nrm
+    right = p - half_width * nrm
+
+    phi = np.linspace(0.0, np.pi, 24)
+    # End cap at p[-1]: +normal → −normal, bulging along +tangent.
+    cap_end = [p[-1] + half_width * (np.cos(a) * nrm[-1] + np.sin(a) * tang[-1])
+               for a in phi]
+    # Start cap at p[0]: −normal → +normal, bulging along −tangent.
+    cap_start = [p[0] + half_width * (np.cos(a) * (-nrm[0]) + np.sin(a) * (-tang[0]))
+                 for a in phi]
+
+    return np.concatenate([left, np.array(cap_end), right[::-1], np.array(cap_start)])
+
+
 def _draw_source_overlays(
     ax,
     pix_xy: np.ndarray,
@@ -219,13 +314,29 @@ def _draw_source_overlays(
     source_titles: list,
     n_pix: int,
     fontsize: int = 7,
+    track_style: str = "capsule",
 ) -> None:
-    """Draw aperture circle for Fornax and track dots for satellites on ax.
+    """Draw aperture circle for Fornax and a track marker for satellites on ax.
 
     pix_xy : (n_sources, n_sel, 2)
+    track_style : how to mark satellite tracks —
+        'capsule' — single curved tube following the arc of the whole track
+                    (default; the streak stays visible inside the thin border);
+        'circles' — open circle of the aperture radius at each timestep;
+        'dots'    — filled dot at each timestep (the original behaviour).
+    'capsule' needs at least two distinct track points; for a degenerate
+    (e.g. single-timestep) track it falls back to 'dots'.
     """
     sat_r = max(1.5, ap_radius_pix / 6.0)
     mid = pix_xy.shape[1] // 2
+
+    def _draw_dots(s, color):
+        for i in range(pix_xy.shape[1]):
+            x_c, y_c = float(pix_xy[s, i, 0]), float(pix_xy[s, i, 1])
+            if 0 <= x_c < n_pix and 0 <= y_c < n_pix:
+                ax.add_patch(Circle((x_c, y_c), sat_r,
+                                    edgecolor=color, facecolor=color,
+                                    alpha=0.6, linewidth=0.0))
 
     for s, title in enumerate(source_titles):
         is_fornax  = "fornax"  in title.lower()
@@ -243,17 +354,27 @@ def _draw_source_overlays(
                                     edgecolor=color, facecolor="none", linewidth=1.5))
                 ax.text(x_c + ap_radius_pix * 1.05, y_c, title,
                         color=color, fontsize=fontsize, ha="left", va="center")
-        else:
+            continue
+
+        # --- satellite track ---
+        verts = _track_outline(pix_xy[s], ap_radius_pix) if track_style == "capsule" else None
+        if verts is not None:
+            ax.add_patch(Polygon(verts, closed=True, edgecolor=color,
+                                 facecolor="none", linewidth=1.0, alpha=0.9))
+        elif track_style == "circles":
             for i in range(pix_xy.shape[1]):
                 x_c, y_c = float(pix_xy[s, i, 0]), float(pix_xy[s, i, 1])
                 if 0 <= x_c < n_pix and 0 <= y_c < n_pix:
-                    ax.add_patch(Circle((x_c, y_c), sat_r,
-                                        edgecolor=color, facecolor=color,
-                                        alpha=0.6, linewidth=0.0))
-            x_m, y_m = float(pix_xy[s, mid, 0]), float(pix_xy[s, mid, 1])
-            if 0 <= x_m < n_pix and 0 <= y_m < n_pix:
-                ax.text(x_m + sat_r * 1.5, y_m, title,
-                        color=color, fontsize=fontsize, ha="left", va="center")
+                    ax.add_patch(Circle((x_c, y_c), ap_radius_pix,
+                                        edgecolor=color, facecolor="none",
+                                        linewidth=0.7, alpha=0.7))
+        else:  # dots, or capsule fallback for a degenerate track
+            _draw_dots(s, color)
+
+        x_m, y_m = float(pix_xy[s, mid, 0]), float(pix_xy[s, mid, 1])
+        if 0 <= x_m < n_pix and 0 <= y_m < n_pix:
+            ax.text(x_m + ap_radius_pix * 1.1, y_m, title,
+                    color=color, fontsize=fontsize, ha="left", va="center")
 
 
 def _save_image_png(
@@ -264,13 +385,17 @@ def _save_image_png(
     pix_xy: np.ndarray | None = None,
     ap_radius_pix: float = 0.0,
     source_titles: list | None = None,
+    scale: str = "linear",
+    cmap: str = "gray",
+    pct: tuple = (0.5, 99.5),
+    track_style: str = "capsule",
 ) -> None:
     """Save a single integrated dirty image as a PNG with WCS axes."""
     n_pix = image.shape[0]
-    vmin, vmax = np.percentile(image, [0.5, 99.5])
+    norm = _build_norm(image, scale, pct[0], pct[1])
     fig = plt.figure(figsize=(6, 6))
     ax = fig.add_subplot(111, projection=wcs)
-    im_obj = ax.imshow(image, cmap="gray", vmin=vmin, vmax=vmax, origin="lower")
+    im_obj = ax.imshow(image, cmap=cmap, norm=norm, origin="lower")
     ax.coords.grid(True, color="blue", ls="dotted")
     ax.coords[0].set_axislabel("Right Ascension")
     ax.coords[1].set_axislabel("Declination")
@@ -278,7 +403,8 @@ def _save_image_png(
     cb = ax.figure.colorbar(im_obj, cax=cax, orientation="vertical")
     cb.ax.tick_params(labelsize=6)
     if pix_xy is not None and source_titles is not None and ap_radius_pix > 0:
-        _draw_source_overlays(ax, pix_xy, ap_radius_pix, source_titles, n_pix, fontsize=8)
+        _draw_source_overlays(ax, pix_xy, ap_radius_pix, source_titles, n_pix,
+                              fontsize=8, track_style=track_style)
     if title:
         ax.set_title(title, fontsize=10)
     plt.tight_layout()
@@ -295,6 +421,10 @@ def _save_image_grid(
     pix_xy: np.ndarray | None = None,
     ap_radius_pix: float = 0.0,
     source_titles: list | None = None,
+    scale: str = "linear",
+    cmap: str = "gray",
+    pct: tuple = (0.5, 99.5),
+    track_style: str = "capsule",
 ) -> None:
     """Save a grid of integrated dirty images (one per channel) as a PNG."""
     n_chan = len(images)
@@ -303,19 +433,20 @@ def _save_image_grid(
     n_pix  = images[0].shape[0]
 
     all_vals = np.concatenate([im.ravel() for im in images])
-    vmin, vmax = np.percentile(all_vals, [0.5, 99.5])
+    norm = _build_norm(all_vals, scale, pct[0], pct[1])
 
     fig = plt.figure(figsize=(4 * n_cols, 4 * n_rows))
     for i, (im, freq) in enumerate(zip(images, chan_freqs_mhz)):
         ax = fig.add_subplot(n_rows, n_cols, i + 1, projection=wcs)
-        ax.imshow(im, cmap="gray", vmin=vmin, vmax=vmax, origin="lower")
+        ax.imshow(im, cmap=cmap, norm=norm, origin="lower")
         ax.set_title(f"{freq:.2f} MHz", fontsize=8)
         ax.coords.grid(True, color="blue", ls="dotted", alpha=0.5)
         ax.coords[0].set_axislabel("")
         ax.coords[1].set_axislabel("")
         ax.tick_params(labelsize=6)
         if pix_xy is not None and source_titles is not None and ap_radius_pix > 0:
-            _draw_source_overlays(ax, pix_xy, ap_radius_pix, source_titles, n_pix, fontsize=6)
+            _draw_source_overlays(ax, pix_xy, ap_radius_pix, source_titles, n_pix,
+                                  fontsize=6, track_style=track_style)
 
     for j in range(n_chan, n_rows * n_cols):
         fig.add_subplot(n_rows, n_cols, j + 1).set_visible(False)
