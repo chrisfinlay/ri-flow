@@ -352,3 +352,59 @@ match `nufft-gif` so the right `lc_data` is located.
 |------|-------------|
 | `<base>_flux_scale.npz` | Solution archive: `freq_mhz`, `model_jy`, per-channel `fornax_med`/`scale_ch`/`good`/`selected`/`used`/`n_clean`/`n_sat`/`n_spike`, `times_sec`, `tle_flag`, and the plane coefficients (`coef_*`, `time_order`, `freq_order`, `ref_freq_mhz`, `logpoly`). |
 | `<base>_flux_scale.png` | 4-panel diagnostic: apparent flux vs ν, `k` vs ν with the fit, `k` vs time with the fit (TLE-flagged times marked), and the fit-residual histogram. |
+
+---
+
+### `rfi-suppression`
+
+Quantifies how far each source is subtracted in a residual, by comparing a
+*before* light-curve column (the data with RFI present, e.g. `real_fluxcal`, or
+the fitted RFI model `tab_rfi`) against the *after* residual column (`tab_res`),
+using the residual's per-timestep noise null (`E[max]` and the band saved by
+`nufft-gif`, see [Noise nulls](#noise-nulls-on-the-light-curves)) as the floor.
+
+For each source it takes the **peak-RFI timestep** (where the before signal is
+brightest) and reports `before`, `after`, the noise `floor`, and the suppression
+factor `before / max(after, floor)`. When the residual sits inside the noise band
+the source is subtracted into the noise, so the factor is a **lower limit** (`≥`)
+— you cannot measure deeper than the floor.
+
+**Prerequisite:** image both columns first in `mfs` mode so their `lc_data/*.npz`
+exist, e.g. the residual with the noise null in Jy:
+
+```bash
+# residual (after) — recopy the flux-cal zarr against the matching column
+nufft-gif -c img_*.yaml -d tab_res -mo mfs -ng -ws -rc -dc REAL_DATA_FLUXCAL -tsx <suffix>
+# data (before)
+nufft-gif -c img_*.yaml -d real_fluxcal -mo mfs -ng -ws -tsx <suffix>
+```
+
+```bash
+# locate the npz pair from the config + suffix (mfs)
+rfi-suppression -c img_*.yaml -tsx <suffix> --after-type tab_res --before-type real_fluxcal
+
+# or pass the two npz files explicitly
+rfi-suppression -a .../tab_res/lc_data/<base>_light_curves.npz \
+                -b .../real_fluxcal/lc_data/<base>_light_curves.npz -o <out_prefix>
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-a / --after` | — | Residual (`tab_res`) `light_curves.npz`. |
+| `-b / --before` | — | Before (e.g. `real_fluxcal`) `light_curves.npz`. |
+| `-c / --config_path` | — | Imaging config to locate the npz pair instead of `-a`/`-b`. |
+| `-tsx / --tab_suffix` | — | Tab suffix subdir under `gifs/` (with `-c`). |
+| `--after-type` | `tab_res` | Residual data type to locate (with `-c`). |
+| `--before-type` | `real_fluxcal` | Before data type to locate (with `-c`). |
+| `-o / --out` | from `--after` | Output path prefix. |
+| `--before-label` | `data (before)` | Legend label for the before curve. |
+
+**Output files**
+
+| File | Description |
+|------|-------------|
+| `<out>_suppression_lightcurves.png` | Per-source before/after `max\|flux\|` on a log axis with the `E[max]` floor + band; each annotated with the peak before→after fluxes and the suppression factor. |
+| `<out>_suppression_summary.png` | Bar chart of the peak suppression factor per source (green = subtracted into noise → lower limit; red = measured residual). |
+
+> The console name registers on the next `pip install -e .`; until then run it as
+> `python -m riflow.scripts.rfi_suppression`.
