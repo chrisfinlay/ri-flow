@@ -137,7 +137,8 @@ def _run(args):
     # nufft_helpers imports jax, matplotlib (sets Agg backend), and astropy
     from riflow.imaging.nufft_helpers import (
         _parse_pixel_deg, _build_wcs, _parse_channels,
-        _dirty_image, _aperture_pixel_coords, _estimate_noise_level, _make_frame_setup,
+        _dirty_image, _aperture_pixel_coords, _estimate_noise_level,
+        _aperture_noise_stats, _make_frame_setup,
         _save_image_png, _save_image_grid, _source_pixel_xy,
     )
     import matplotlib.pyplot as plt
@@ -395,6 +396,23 @@ def _run(args):
     else:
         wcs = wcs_ref
 
+    # Known astronomical point sources to keep out of the noise / control-aperture
+    # sampling (RA/Dec pairs in deg from `gif.avoid_sources`). Their apertures are
+    # unioned across all frames into a single exclusion mask.
+    avoid_sources = config["gif"].get("avoid_sources", []) or []
+    extra_excluded = None
+    if avoid_sources:
+        avoid_arr = np.asarray(avoid_sources, dtype=float)  # (n_avoid, 2)
+        avoid_radec = np.repeat(avoid_arr[:, :, None], n_times, axis=2)
+        avoid_masks, _, _ = _aperture_pixel_coords(
+            wcs, avoid_radec, aperture_radius_deg, n_pix
+        )
+        extra_excluded = np.zeros((n_pix, n_pix), dtype=bool)
+        for s_masks in avoid_masks:
+            for mask in s_masks:
+                extra_excluded[mask] = True
+        print(f"  Excluding {len(avoid_arr)} avoid_sources from noise estimation.")
+
     # -----------------------------------------------------------------------
     # 4. Process each data type
     # -----------------------------------------------------------------------
@@ -542,7 +560,16 @@ def _run(args):
             ap_masks, pix_xy, ap_radius_pix = _aperture_pixel_coords(
                 wcs, radec_all, aperture_radius_deg, n_pix
             )
-            noise_level = _estimate_noise_level(images, ap_masks, n_pix)
+            noise_stats = _aperture_noise_stats(
+                images, ap_masks, n_pix, ap_radius_pix,
+                extra_excluded=extra_excluded,
+            )
+            sigma_t     = noise_stats["sigma_t"]
+            exp_max_t   = noise_stats["exp_max_t"]
+            band_max_t  = noise_stats["band_max_t"]
+            # Scalar fallback for the per-channel grid / spectrogram / spectrum
+            # summary plots, which draw a single horizontal noise line.
+            noise_level = float(np.nanmedian(sigma_t))
 
             if no_gif:
                 for f_idx, im_data in enumerate(images):
@@ -619,6 +646,11 @@ def _run(args):
                 os.path.join(lc_data_path, f"{run_gif_name}_light_curves.npz"),
                 light_curves=light_curves,
                 noise_level=np.array(noise_level),
+                sigma_t=sigma_t,
+                exp_max_t=exp_max_t,
+                band_max_t=band_max_t,
+                gumbel_loc=np.array(noise_stats["gumbel_loc"]),
+                gumbel_scale=np.array(noise_stats["gumbel_scale"]),
                 times_sec=times_sec,
                 titles=np.array(titles),
                 chan_freq_mhz=chan_freqs[run_chans] / 1e6,
@@ -628,7 +660,8 @@ def _run(args):
                 plot_light_curves(
                     times_sec, light_curves, titles,
                     os.path.join(save_path, f"{run_gif_name}.png"),
-                    noise_level=noise_level,
+                    noise_level=noise_level, sigma_t=sigma_t,
+                    exp_max=exp_max_t, band_max=band_max_t,
                 )
             if mode == "perchan":
                 perchan_lcs.append(light_curves)
@@ -775,6 +808,9 @@ def _replot(args):
                 plot_light_curves(
                     d["times_sec"], d["light_curves"], titles, out,
                     noise_level=float(d["noise_level"]),
+                    sigma_t=d["sigma_t"] if "sigma_t" in d else None,
+                    exp_max=d["exp_max_t"] if "exp_max_t" in d else None,
+                    band_max=d["band_max_t"] if "band_max_t" in d else None,
                 )
                 print(f"  Light curve replotted: {out}")
             continue
@@ -813,9 +849,15 @@ def _replot(args):
         # Per-channel individual light curve plots (original behaviour)
         if args.per_chan_lc:
             for (idx, f), lc, nl in zip(entries, perchan_lcs, perchan_noise):
+                d            = np.load(f, allow_pickle=True)
                 run_gif_name = os.path.basename(f).replace("_light_curves.npz", "")
                 out          = os.path.join(save_path, f"{run_gif_name}.png")
-                plot_light_curves(times_sec, lc, titles, out, noise_level=nl)
+                plot_light_curves(
+                    times_sec, lc, titles, out, noise_level=nl,
+                    sigma_t=d["sigma_t"] if "sigma_t" in d else None,
+                    exp_max=d["exp_max_t"] if "exp_max_t" in d else None,
+                    band_max=d["band_max_t"] if "band_max_t" in d else None,
+                )
                 print(f"  Light curve replotted: {out}")
         # Per-channel light curve grid (default)
         elif len(perchan_lcs) > 0:

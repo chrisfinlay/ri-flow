@@ -287,7 +287,20 @@ def plot_light_curves(
     titles: list,
     save_name: str,
     noise_level: float | None = None,
+    sigma_t: np.ndarray | None = None,
+    exp_max: np.ndarray | None = None,
+    band_max: np.ndarray | None = None,
 ):
+    """Plot per-source std / max|flux| light curves with noise expectations.
+
+    sigma_t  : (n_times,) per-timestep image noise sigma(t); drawn as a curve to
+               compare against the `std` light curve. Falls back to a flat line
+               at `noise_level` when not given.
+    exp_max  : (n_times,) expected aperture max|flux| of pure noise (the Gumbel
+               mean), drawn to compare against the `max|flux|` light curve.
+    band_max : (n_times,) upper-quantile aperture max|flux| of pure noise; shaded
+               band between exp_max and band_max marks the noise-consistent zone.
+    """
     plt.rcParams["font.size"] = 16
     n_curves = len(titles)
 
@@ -299,9 +312,18 @@ def plot_light_curves(
     for i in range(n_curves):
         ax[i, 0].plot(times, light_curves[i, :, 0], label="std")
         ax[i, 0].plot(times, light_curves[i, :, 1], label="max|flux|")
-        if noise_level is not None:
+        if sigma_t is not None:
+            ax[i, 0].plot(times, sigma_t, color="gray", linewidth=1.2,
+                          linestyle="--", alpha=0.8, label=r"image noise $\sigma(t)$")
+        elif noise_level is not None:
             ax[i, 0].axhline(noise_level, color="gray", linewidth=1,
                              linestyle="--", alpha=0.7, label="noise")
+        if exp_max is not None:
+            ax[i, 0].plot(times, exp_max, color="firebrick", linewidth=1.2,
+                          linestyle="--", alpha=0.9, label="E[max|flux|] noise")
+            if band_max is not None:
+                ax[i, 0].fill_between(times, exp_max, band_max, color="firebrick",
+                                      alpha=0.15, linewidth=0, label="noise 99% band")
         ax[i, 0].legend()
         ax[i, 0].set_title(titles[i])
         ax[i, 0].set_ylabel("Flux [Jy/bm]")
