@@ -41,6 +41,11 @@ def main():
                         help="Enable w-stacking correction for wide-field imaging.")
     parser.add_argument("-nw", "--n_wplanes", type=int, default=None,
                         help="Number of w-stacking planes (default: auto-estimated from data).")
+    parser.add_argument("-dc", "--data-col", default=None,
+                        help="Override the reference data column used by --recopy when "
+                             "forming residuals from the zarr (config data.data_col). "
+                             "Must match the scale the run was fit on, e.g. "
+                             "REAL_DATA_FLUXCAL for a flux-calibrated zarr.")
     parser.add_argument("-rc", "--recopy", action="store_true", default=False,
                         help="Re-copy TABASCAL results from the matching zarr into the MS "
                              "before imaging.  Requires -tsx.")
@@ -225,12 +230,18 @@ def _run(args):
     # -----------------------------------------------------------------------
     if args.recopy:
         sim_dir = config["data"].get("sim_dir") or None
+        # The recopy forms residuals as (data_col - models from the zarr), so the
+        # reference column must be on the same scale the run was fit on: pass
+        # REAL_DATA_FLUXCAL via -dc when recopying a flux-calibrated zarr, else the
+        # residual is data minus k-scaled models (garbage).
+        recopy_data_col = args.data_col or config["data"]["data_col"]
         print(f"\n[0/4] Re-copying TABASCAL results (tab_data='{args.tab_data}', "
-              f"model='{args.model_name}', suffix='{tab_suffix}')...")
+              f"model='{args.model_name}', suffix='{tab_suffix}', "
+              f"data_col='{recopy_data_col}')...")
         recopy_tab_results(
             ms_path=ms_path,
             tab_suffix=tab_suffix,
-            data_col=config["data"]["data_col"],
+            data_col=recopy_data_col,
             sim_dir=sim_dir,
             tab_data=args.tab_data,
             model_name=args.model_name,
