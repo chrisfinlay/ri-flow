@@ -2,6 +2,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 from matplotlib.patches import Circle
 
 from astropy.io import fits
@@ -164,14 +165,17 @@ def plot_spectrogram(
         cb = fig.colorbar(pcm, ax=ax, label=cbar_label)
         # Mark the noise null on the colorbar: expected level (dashed) and the
         # upper `level` band (dotted). These are medians over time/frequency.
+        # Black-outlined so they read on both the dark and bright ends of inferno.
+        outline = [pe.withStroke(linewidth=3.5, foreground="black")]
         if noise_exp is not None:
-            cb.ax.axhline(noise_exp, color="cyan", linewidth=1.5, linestyle="--",
-                          label="E[noise]")
+            cb.ax.axhline(noise_exp, color="cyan", linewidth=2.5, linestyle="--",
+                          path_effects=outline)
         if noise_hi is not None:
-            cb.ax.axhline(noise_hi, color="cyan", linewidth=1.0, linestyle=":",
-                          label=f"noise {pct}%")
+            cb.ax.axhline(noise_hi, color="white", linewidth=2.0, linestyle=":",
+                          path_effects=outline)
         if noise_exp is None and noise_hi is None and noise_level is not None:
-            cb.ax.axhline(noise_level, color="cyan", linewidth=1.5, linestyle="--")
+            cb.ax.axhline(noise_level, color="cyan", linewidth=2.5, linestyle="--",
+                          path_effects=outline)
         ax.set_title(f"{titles[s_idx]} — {stat_name}")
         ax.set_xlabel("Time [s]")
         ax.set_ylabel("Frequency [MHz]")
@@ -231,8 +235,8 @@ def plot_spectrum(
         ax.plot(chan_freqs_mhz, mean_over_time[:, s_idx], label="mean over time")
         ax.plot(chan_freqs_mhz, max_over_time[:, s_idx],  label="max over time")
         if exp_freq is not None:
-            ax.plot(chan_freqs_mhz, exp_freq, color="gray", linewidth=1.2,
-                    linestyle="--", alpha=0.8, label="E[noise]")
+            ax.plot(chan_freqs_mhz, exp_freq, color="0.25", linewidth=1.8,
+                    linestyle="--", label="E[noise]")
             if lo_freq is not None and hi_freq is not None:
                 ax.fill_between(chan_freqs_mhz, lo_freq, hi_freq, color="gray",
                                 alpha=0.15, linewidth=0, label=f"noise {pct}%")
@@ -305,12 +309,12 @@ def plot_perchan_lc_grid(
                             alpha=0.15, linewidth=0,
                             label=f"noise {pct}%" if i == 0 else None)
         if center is not None:
-            ax.plot(times, center[i], color="gray", linewidth=0.7, linestyle="--",
-                    alpha=0.8, label="E[noise]" if i == 0 else None)
+            ax.plot(times, center[i], color="0.25", linewidth=1.1, linestyle="--",
+                    label="E[noise]" if i == 0 else None)
         elif noise_levels is not None:
             lbl = "noise" if i == 0 else None
-            ax.axhline(noise_levels[i], color="gray", linewidth=0.7,
-                       linestyle="--", alpha=0.7, label=lbl)
+            ax.axhline(noise_levels[i], color="0.25", linewidth=1.0,
+                       linestyle="--", label=lbl)
         ax.set_title(f"{freq_mhz:.2f} MHz", fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.tick_params(labelsize=6)
@@ -359,38 +363,47 @@ def plot_light_curves(
     n_curves = len(titles)
     pct = int(round(level * 100))
 
-    # squeeze=False keeps `ax` a 2-D array even when n_curves == 1, so a single
-    # source (e.g. Fornax A only) doesn't break subscripting.
-    fig, ax = plt.subplots(n_curves, 1, figsize=(8, 6.5 * n_curves),
-                           squeeze=False)
+    # A short axis at the top holds a single shared legend (the curve/band types
+    # are identical across sources, so a per-subplot legend is redundant and hides
+    # the curves). Each source subplot below shows only its name as a title.
+    fig = plt.figure(figsize=(8, 6.5 * n_curves + 1.0))
+    gs = fig.add_gridspec(n_curves + 1, 1, height_ratios=[0.6] + [6.5] * n_curves,
+                          hspace=0.35)
+    legend_ax = fig.add_subplot(gs[0])
+    legend_ax.axis("off")
+    axes = [fig.add_subplot(gs[i + 1]) for i in range(n_curves)]
 
-    for i in range(n_curves):
-        std_line, = ax[i, 0].plot(times, light_curves[i, :, 0], label="std")
-        ax[i, 0].plot(times, light_curves[i, :, 1], label="max|flux|")
+    for i, a in enumerate(axes):
+        std_line, = a.plot(times, light_curves[i, :, 0], label="std")
+        a.plot(times, light_curves[i, :, 1], label="max|flux|")
         if std_lo is not None and std_hi is not None:
-            ax[i, 0].fill_between(times, std_lo, std_hi, color=std_line.get_color(),
-                                  alpha=0.15, linewidth=0, label=f"std noise {pct}%")
+            a.fill_between(times, std_lo, std_hi, color=std_line.get_color(),
+                           alpha=0.18, linewidth=0, label=f"std noise {pct}%")
         if sigma_t is not None:
-            ax[i, 0].plot(times, sigma_t, color="gray", linewidth=1.2,
-                          linestyle="--", alpha=0.8, label=r"image noise $\sigma(t)$")
+            a.plot(times, sigma_t, color="0.25", linewidth=1.8,
+                   linestyle="--", label=r"image noise $\sigma(t)$")
         elif noise_level is not None:
-            ax[i, 0].axhline(noise_level, color="gray", linewidth=1,
-                             linestyle="--", alpha=0.7, label="noise")
+            a.axhline(noise_level, color="0.25", linewidth=1.5,
+                      linestyle="--", label="noise")
         if exp_max is not None:
-            ax[i, 0].plot(times, exp_max, color="firebrick", linewidth=1.2,
-                          linestyle="--", alpha=0.9, label="E[max|flux|] noise")
+            a.plot(times, exp_max, color="darkred", linewidth=1.8,
+                   linestyle="--", label="E[max|flux|] noise")
         if max_lo is not None and max_hi is not None:
-            ax[i, 0].fill_between(times, max_lo, max_hi, color="firebrick",
-                                  alpha=0.15, linewidth=0, label=f"max noise {pct}%")
-        ax[i, 0].legend()
-        ax[i, 0].set_title(titles[i])
-        ax[i, 0].set_ylabel("Flux [Jy/bm]")
-        ax[i, 0].set_xlabel("Time [s]")
+            a.fill_between(times, max_lo, max_hi, color="firebrick",
+                           alpha=0.18, linewidth=0, label=f"max noise {pct}%")
+        a.set_title(titles[i])
+        a.set_ylabel("Flux [Jy/bm]")
+        if i == n_curves - 1:
+            a.set_xlabel("Time [s]")
         # Pin the x-axis to the full time range; otherwise matplotlib autoscales
         # to the finite (in-FOV) samples and each curve starts/ends at a
         # different time wherever the source leaves the field of view.
-        ax[i, 0].set_xlim(times[0], times[-1])
-        ax[i, 0].grid()
+        a.set_xlim(times[0], times[-1])
+        a.grid()
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    legend_ax.legend(handles, labels, loc="center", ncol=3, frameon=False,
+                     fontsize=13, columnspacing=1.4, handlelength=2.2)
 
     plt.savefig(save_name, dpi=200, format="png", bbox_inches="tight")
     plt.close(fig)

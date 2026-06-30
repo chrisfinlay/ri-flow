@@ -59,6 +59,7 @@ nufft-gif -c <config.yaml> [options]
 | `-ng / --no-gif` | off | Skip GIF rendering; still compute dirty images for aperture statistics, light curves, spectrograms, and integrated image plots. |
 | `-pcl / --per-chan-lc` | off | In `perchan` mode, save one light curve PNG per channel instead of the default single-grid figure. |
 | `-rp / --replot` | off | Skip the MS read and imaging entirely; regenerate the light curve, spectrogram, and spectrum plots from the previously saved `lc_data/*.npz`. Fast iteration on plot styling. Use the same `-d`/`-mo` and suffix flags as the original run so the right files are found. |
+| `-nbl / --noise-band-level` | `0.95` | Central level for the per-timestep noise bands drawn on the light curves / grid / spectrum (see [Noise nulls](#noise-nulls-on-the-light-curves) below). `0.95` → 2.5–97.5 percentile band. |
 
 **Satellite tracking**
 
@@ -77,6 +78,7 @@ nufft-gif -c <config.yaml> [options]
 | `-td / --tab_data` | `map` | Zarr result type: `map` or `init`. |
 | `-mn / --model_name` | `Custom` | TABASCAL model name encoded in the zarr filename. |
 | `-rc / --recopy` | off | Re-copy TABASCAL results from the zarr into the MS before imaging. Requires `-tsx`. |
+| `-dc / --data-col` | from config | Override the reference data column used by `-rc` when forming residuals from the zarr. **Must match the scale the run was fit on** — pass `REAL_DATA_FLUXCAL` when recopying a flux-calibrated zarr, otherwise the residual is `data − k·models` (the k-scaled models appear as if unsubtracted). |
 
 **Config YAML format**
 
@@ -119,9 +121,37 @@ gif:
 | `<base>_perchan_image_grid_chan_X-Y_tidx_X-Y.png` | perchan | Grid of time-integrated images, one per channel, with source overlays. |
 | `<base>_chan_X-Y_tidx_X-Y_gifs/<base>_chN.gif` | perchan | Per-channel GIFs in a dedicated subdirectory. |
 | `<base>_perchan_lc_grid_{std,maxabs}_chan_X-Y.png` | perchan | Grid of light curve subplots, one per channel, per-row y-scale (default). |
-| `<base>_spectrogram_{std,maxabs}_chan_X-Y.png` | perchan | Time–frequency spectrogram (std and max\|flux\| statistics) with noise indicator. |
-| `<base>_spectrum_{std,maxabs}_chan_X-Y.png` | perchan | Frequency spectrum (mean and max over time, NaN-safe) with noise indicator. |
-| `lc_data/<base>_light_curves.npz` | both | NumPy archive: `light_curves (n_sources, n_times, 2)` (columns `[std, max\|flux\|]`), `noise_level`, plus `times_sec`, `titles`, `chan_freq_mhz`, `chan_idx` so the file is self-contained for `--replot` and `flux-calibrate`. |
+| `<base>_spectrogram_{std,maxabs}_chan_X-Y.png` | perchan | Time–frequency spectrogram (std and max\|flux\| statistics); colorbar marks `E[noise]` (cyan dashed) and the upper band (white dotted). |
+| `<base>_spectrum_{std,maxabs}_chan_X-Y.png` | perchan | Frequency spectrum (mean and max over time, NaN-safe) with the `E[noise]` line + shaded band vs frequency. |
+| `lc_data/<base>_light_curves.npz` | both | NumPy archive: `light_curves (n_sources, n_times, 2)` (columns `[std, max\|flux\|]`), `noise_level`, the per-timestep noise nulls `sigma_t`, `exp_max_t`, `max_lo_t`, `max_hi_t`, `std_exp_t`, `std_lo_t`, `std_hi_t`, the `gumbel_loc`/`gumbel_scale` and `band_level`, plus `times_sec`, `titles`, `chan_freq_mhz`, `chan_idx` so the file is self-contained for `--replot` and `flux-calibrate`. |
+
+#### Noise nulls on the light curves
+
+The light curves measure, in each source aperture, the `std` and the
+`max|flux|` per timestep. Even on a pure-noise residual those are non-zero — the
+`max|flux|` over a multi-beam aperture follows extreme-value statistics — so to
+judge whether a satellite is subtracted to the noise floor each plot overlays a
+**per-timestep noise null** computed from the image itself:
+
+- **`σ(t)`** — the background per-pixel noise, estimated each timestep from
+  off-source pixels inside the horizon (excluding every source aperture and any
+  `gif.avoid_sources`). Compare it against the `std` curve.
+- **`E[max|flux|]` + band** — control apertures of the same radius are scattered
+  over the off-source background; their `max|flux|`/`σ` is pooled across all
+  timesteps and fitted with a single Gumbel (an extreme-value distribution). The
+  expected max and a central `--noise-band-level` band (default 95 %) then scale
+  per timestep as `σ(t) × (dimensionless Gumbel statistic)`. The `std` curve gets
+  an analogous band from the empirical `std`/`σ` quantiles.
+
+**Reading it.** A `max|flux|` (or `std`) curve that stays inside its band is
+consistent with noise — the source is subtracted to the floor, and the
+suppression can only be quoted as a *lower limit* `S_before / E[max]`. Excursions
+above the band are candidate residual signal at that flux. The same nulls drive
+the perchan grid (per-channel band + `E[noise]` line), the spectrogram (colorbar
+markers) and the spectrum (band vs frequency; note its *max-over-time* line
+naturally sits above a per-timestep band, so compare the *mean-over-time* line).
+These pair naturally with flux-calibrated columns so the floor is in Jy — image
+a `*_FLUXCAL`-fit residual via `-rc -dc REAL_DATA_FLUXCAL`.
 
 ---
 
