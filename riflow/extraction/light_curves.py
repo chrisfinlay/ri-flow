@@ -363,6 +363,13 @@ def plot_light_curves(
     n_curves = len(titles)
     pct = int(round(level * 100))
 
+    # Unified colour scheme: the `std` statistic and its noise null (band +
+    # sigma(t)) share a blue family; the `max|flux|` statistic and its null
+    # (band + E[max]) share an orange family. The expected-noise lines use the
+    # darker shade of each family so they read against the band.
+    STD_C, STD_DARK = "tab:blue", "#08306b"
+    MAX_C, MAX_DARK = "tab:orange", "#7f2704"
+
     # A short axis at the top holds a single shared legend (the curve/band types
     # are identical across sources, so a per-subplot legend is redundant and hides
     # the curves). Each source subplot below shows only its name as a title.
@@ -374,22 +381,22 @@ def plot_light_curves(
     axes = [fig.add_subplot(gs[i + 1]) for i in range(n_curves)]
 
     for i, a in enumerate(axes):
-        std_line, = a.plot(times, light_curves[i, :, 0], label="std")
-        a.plot(times, light_curves[i, :, 1], label="max|flux|")
+        a.plot(times, light_curves[i, :, 0], color=STD_C, label="std")
+        a.plot(times, light_curves[i, :, 1], color=MAX_C, label="max|flux|")
         if std_lo is not None and std_hi is not None:
-            a.fill_between(times, std_lo, std_hi, color=std_line.get_color(),
+            a.fill_between(times, std_lo, std_hi, color=STD_C,
                            alpha=0.18, linewidth=0, label=f"std noise {pct}%")
         if sigma_t is not None:
-            a.plot(times, sigma_t, color="0.25", linewidth=1.8,
+            a.plot(times, sigma_t, color=STD_DARK, linewidth=1.8,
                    linestyle="--", label=r"image noise $\sigma(t)$")
         elif noise_level is not None:
-            a.axhline(noise_level, color="0.25", linewidth=1.5,
+            a.axhline(noise_level, color=STD_DARK, linewidth=1.5,
                       linestyle="--", label="noise")
         if exp_max is not None:
-            a.plot(times, exp_max, color="darkred", linewidth=1.8,
+            a.plot(times, exp_max, color=MAX_DARK, linewidth=1.8,
                    linestyle="--", label="E[max|flux|] noise")
         if max_lo is not None and max_hi is not None:
-            a.fill_between(times, max_lo, max_hi, color="firebrick",
+            a.fill_between(times, max_lo, max_hi, color=MAX_C,
                            alpha=0.18, linewidth=0, label=f"max noise {pct}%")
         a.set_title(titles[i])
         a.set_ylabel("Flux [Jy/bm]")
