@@ -130,6 +130,9 @@ def plot_spectrogram(
     save_name: str,
     stat_idx: int = 1,
     noise_level: float | None = None,
+    noise_exp: float | None = None,
+    noise_hi: float | None = None,
+    level: float = 0.95,
 ) -> None:
     """Plot a time-frequency spectrogram from per-channel light curves.
 
@@ -141,10 +144,14 @@ def plot_spectrogram(
     titles         : source names, length n_sources
     save_name      : output PNG path
     stat_idx       : 0 → std, 1 → max_abs
-    noise_level    : if given, drawn as a horizontal line on each colorbar
+    noise_level    : legacy single noise line on each colorbar (fallback)
+    noise_exp      : expected-noise level for this stat, marked on the colorbar
+    noise_hi       : upper `level` band of the noise, marked on the colorbar
+    level          : band level for the colorbar label (0.95 → "95%")
     """
     stat_labels = {0: ("std", "Std [Jy/bm]"), 1: ("max|flux|", "max|flux| [Jy/bm]")}
     stat_name, cbar_label = stat_labels[stat_idx]
+    pct = int(round(level * 100))
 
     n_sources = len(titles)
     data = lc_per_chan[:, :, :, stat_idx]  # (n_chan, n_sources, n_times)
@@ -155,7 +162,15 @@ def plot_spectrogram(
         z = data[:, s_idx, :]  # (n_chan, n_times)
         pcm = ax.pcolormesh(times, chan_freqs_mhz, z, shading="nearest", cmap="inferno")
         cb = fig.colorbar(pcm, ax=ax, label=cbar_label)
-        if noise_level is not None:
+        # Mark the noise null on the colorbar: expected level (dashed) and the
+        # upper `level` band (dotted). These are medians over time/frequency.
+        if noise_exp is not None:
+            cb.ax.axhline(noise_exp, color="cyan", linewidth=1.5, linestyle="--",
+                          label="E[noise]")
+        if noise_hi is not None:
+            cb.ax.axhline(noise_hi, color="cyan", linewidth=1.0, linestyle=":",
+                          label=f"noise {pct}%")
+        if noise_exp is None and noise_hi is None and noise_level is not None:
             cb.ax.axhline(noise_level, color="cyan", linewidth=1.5, linestyle="--")
         ax.set_title(f"{titles[s_idx]} — {stat_name}")
         ax.set_xlabel("Time [s]")
@@ -173,6 +188,10 @@ def plot_spectrum(
     save_name: str,
     noise_level: float | None = None,
     stat_idx: int = 1,
+    exp_freq: np.ndarray | None = None,
+    lo_freq: np.ndarray | None = None,
+    hi_freq: np.ndarray | None = None,
+    level: float = 0.95,
 ) -> None:
     """Plot flux spectrum (frequency vs flux) from per-channel light curves.
 
@@ -182,11 +201,16 @@ def plot_spectrum(
     lc_per_chan    : (n_chan, n_sources, n_times, 2) — axis -1 is [std, max_abs]
     titles         : source names, length n_sources
     save_name      : output PNG path
-    noise_level    : if given, drawn as a horizontal line on each subplot
+    noise_level    : legacy single noise line per subplot (fallback)
     stat_idx       : 0 → std, 1 → max|flux|
+    exp_freq       : (n_chan,) expected noise vs frequency (time-median of the
+                     per-timestep null); drawn as a line on each subplot.
+    lo_freq,hi_freq: (n_chan,) central `level` noise band vs frequency; shaded.
+    level          : band level for the legend label (0.95 → "95%").
     """
     stat_labels = {0: "Std [Jy/bm]", 1: "max|flux| [Jy/bm]"}
     y_label = stat_labels[stat_idx]
+    pct = int(round(level * 100))
 
     n_sources = len(titles)
     stat_vals = lc_per_chan[:, :, :, stat_idx]  # (n_chan, n_sources, n_times)
@@ -206,7 +230,13 @@ def plot_spectrum(
     for s_idx, ax in enumerate(axes[:, 0]):
         ax.plot(chan_freqs_mhz, mean_over_time[:, s_idx], label="mean over time")
         ax.plot(chan_freqs_mhz, max_over_time[:, s_idx],  label="max over time")
-        if noise_level is not None:
+        if exp_freq is not None:
+            ax.plot(chan_freqs_mhz, exp_freq, color="gray", linewidth=1.2,
+                    linestyle="--", alpha=0.8, label="E[noise]")
+            if lo_freq is not None and hi_freq is not None:
+                ax.fill_between(chan_freqs_mhz, lo_freq, hi_freq, color="gray",
+                                alpha=0.15, linewidth=0, label=f"noise {pct}%")
+        elif noise_level is not None:
             ax.axhline(noise_level, color="gray", linewidth=1,
                        linestyle="--", alpha=0.7, label="noise")
         ax.set_title(titles[s_idx])
@@ -228,6 +258,10 @@ def plot_perchan_lc_grid(
     save_name: str,
     noise_levels: list | None = None,
     stat_idx: int = 1,
+    band_lo: np.ndarray | None = None,
+    band_hi: np.ndarray | None = None,
+    center: np.ndarray | None = None,
+    level: float = 0.95,
 ) -> None:
     """Grid of light curve subplots, one per frequency channel.
 
@@ -235,10 +269,16 @@ def plot_perchan_lc_grid(
 
     Parameters
     ----------
-    stat_idx : 0 → std, 1 → max|flux|
+    stat_idx          : 0 → std, 1 → max|flux|
+    band_lo, band_hi  : (n_chan, n_times) central `level` noise band for the
+                        selected stat; shaded per-channel subplot.
+    center            : (n_chan, n_times) expected-noise curve for the stat
+                        (sigma(t) for std, E[max] for max|flux|).
+    level             : band level for the legend label (0.95 → "95%").
     """
     stat_labels = {0: "Std [Jy/bm]", 1: "max|flux| [Jy/bm]"}
     y_label = stat_labels[stat_idx]
+    pct = int(round(level * 100))
 
     n_chan = len(perchan_lcs)
     n_cols = int(np.ceil(np.sqrt(n_chan)))
@@ -260,7 +300,14 @@ def plot_perchan_lc_grid(
         for s_idx, title in enumerate(titles):
             color = prop_cycle[s_idx % len(prop_cycle)]
             ax.plot(times, lc[s_idx, :, stat_idx], color=color, linewidth=0.9, label=title)
-        if noise_levels is not None:
+        if band_lo is not None and band_hi is not None:
+            ax.fill_between(times, band_lo[i], band_hi[i], color="gray",
+                            alpha=0.15, linewidth=0,
+                            label=f"noise {pct}%" if i == 0 else None)
+        if center is not None:
+            ax.plot(times, center[i], color="gray", linewidth=0.7, linestyle="--",
+                    alpha=0.8, label="E[noise]" if i == 0 else None)
+        elif noise_levels is not None:
             lbl = "noise" if i == 0 else None
             ax.axhline(noise_levels[i], color="gray", linewidth=0.7,
                        linestyle="--", alpha=0.7, label=lbl)

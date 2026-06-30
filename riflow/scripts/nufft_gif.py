@@ -482,6 +482,7 @@ def _run(args):
 
         perchan_lcs:    list[np.ndarray] = []
         perchan_noise:  list[float]     = []
+        perchan_stats:  list[dict]      = []
         perchan_images: list[np.ndarray] = []
 
         chan_range_suffix  = f"_chan_{chan_sel[0]}-{chan_sel[-1]}"
@@ -687,6 +688,7 @@ def _run(args):
             if mode == "perchan":
                 perchan_lcs.append(light_curves)
                 perchan_noise.append(noise_level)
+                perchan_stats.append(noise_stats)
 
 
         # --- Integrated image plot(s) ---
@@ -729,6 +731,9 @@ def _run(args):
             )
             print(f"Perchan image grid saved as {img_grid_path}")
 
+        # Per-channel noise nulls stacked to (n_chan, n_times) for band overlays.
+        pc_sel, pc_level = _stack_perchan_bands(perchan_stats)
+
         # --- Per-channel light curve grid (perchan mode, default) ---
         if mode == "perchan" and not args.per_chan_lc and len(perchan_lcs) > 0:
             for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
@@ -736,9 +741,12 @@ def _run(args):
                     save_path,
                     f"{gif_base}_perchan_lc_grid_{stat_tag}{chan_range_suffix}.png",
                 )
+                grid_kw = dict(noise_levels=perchan_noise, stat_idx=stat_idx)
+                if pc_sel is not None:
+                    center, blo, bhi = pc_sel(stat_idx)
+                    grid_kw.update(band_lo=blo, band_hi=bhi, center=center, level=pc_level)
                 plot_perchan_lc_grid(
-                    times_sec, perchan_lcs, chan_freqs / 1e6, titles, grid_path,
-                    noise_levels=perchan_noise, stat_idx=stat_idx,
+                    times_sec, perchan_lcs, chan_freqs / 1e6, titles, grid_path, **grid_kw
                 )
                 print(f"Per-channel LC grid ({stat_tag}) saved as {grid_path}")
 
@@ -749,16 +757,25 @@ def _run(args):
             noise_level = float(np.median(perchan_noise))
             for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
                 sp = os.path.join(save_path, f"{gif_base}_spectrogram_{stat_tag}{chan_range_suffix}.png")
-                plot_spectrogram(times_sec, freqs_mhz, lc_stack, titles, sp,
-                                 stat_idx=stat_idx, noise_level=noise_level)
+                spg_kw = dict(stat_idx=stat_idx, noise_level=noise_level)
+                if pc_sel is not None:
+                    center, _blo, bhi = pc_sel(stat_idx)
+                    spg_kw.update(noise_exp=float(np.nanmedian(center)),
+                                  noise_hi=float(np.nanmedian(bhi)), level=pc_level)
+                plot_spectrogram(times_sec, freqs_mhz, lc_stack, titles, sp, **spg_kw)
                 print(f"Spectrogram ({stat_tag}) saved as {sp}")
             for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
                 spect_path = os.path.join(
                     save_path,
                     f"{gif_base}_spectrum_{stat_tag}{chan_range_suffix}.png",
                 )
-                plot_spectrum(freqs_mhz, lc_stack, titles, spect_path,
-                              noise_level=noise_level, stat_idx=stat_idx)
+                spm_kw = dict(stat_idx=stat_idx, noise_level=noise_level)
+                if pc_sel is not None:
+                    center, blo, bhi = pc_sel(stat_idx)
+                    spm_kw.update(exp_freq=np.nanmedian(center, axis=1),
+                                  lo_freq=np.nanmedian(blo, axis=1),
+                                  hi_freq=np.nanmedian(bhi, axis=1), level=pc_level)
+                plot_spectrum(freqs_mhz, lc_stack, titles, spect_path, **spm_kw)
                 print(f"Spectrum ({stat_tag}) saved as {spect_path}")
 
     print(f"\nTotal wall time: {_time.perf_counter() - _t_start:.2f}s")
@@ -767,6 +784,30 @@ def _run(args):
 # ---------------------------------------------------------------------------
 # Replot — regenerate plots from saved lc_data/*.npz, no MS / imaging needed
 # ---------------------------------------------------------------------------
+
+def _stack_perchan_bands(perchan_stats):
+    """Stack per-channel noise-stat dicts/npz to (n_chan, n_times) band arrays.
+
+    Returns ``(selector, level)`` where ``selector(stat_idx)`` gives
+    ``(center, lo, hi)`` for std (0, centred on sigma(t)) or max|flux|
+    (1, centred on E[max]). Returns ``(None, None)`` when any entry lacks the
+    per-timestep noise keys (e.g. older npz files)."""
+    import numpy as np
+    keys = ("sigma_t", "exp_max_t", "max_lo_t", "max_hi_t", "std_lo_t", "std_hi_t")
+    if not perchan_stats or any(k not in s for s in perchan_stats for k in keys):
+        return None, None
+    pc = {k: np.stack([s[k] for s in perchan_stats]) for k in keys}
+    first = perchan_stats[0]
+    level = float(first["level"] if "level" in first
+                  else first["band_level"] if "band_level" in first else 0.95)
+
+    def selector(stat_idx):
+        if stat_idx == 0:
+            return pc["sigma_t"], pc["std_lo_t"], pc["std_hi_t"]
+        return pc["exp_max_t"], pc["max_lo_t"], pc["max_hi_t"]
+
+    return selector, level
+
 
 def _lc_noise_kwargs(d) -> dict:
     """plot_light_curves noise-band kwargs from a light-curve npz, taking only
@@ -862,14 +903,21 @@ def _replot(args):
 
         perchan_lcs:   list[np.ndarray] = []
         perchan_noise: list[float]      = []
+        perchan_stats: list[dict]       = []
         freqs_mhz:     list[float]      = []
         chan_idxs:     list[int]        = []
         titles    = None
         times_sec = None
+        _band_keys = ("sigma_t", "exp_max_t", "max_lo_t", "max_hi_t",
+                      "std_lo_t", "std_hi_t")
         for idx, f in entries:
             d = np.load(f, allow_pickle=True)
             perchan_lcs.append(d["light_curves"])
             perchan_noise.append(float(d["noise_level"]))
+            st = {k: d[k] for k in _band_keys if k in d}
+            if "band_level" in d:
+                st["level"] = float(d["band_level"])
+            perchan_stats.append(st)
             freqs_mhz.append(float(np.atleast_1d(d["chan_freq_mhz"])[0]))
             chan_idxs.append(idx)
             if titles is None:
@@ -878,6 +926,7 @@ def _replot(args):
 
         freqs_mhz         = np.array(freqs_mhz)
         chan_range_suffix = f"_chan_{chan_idxs[0]}-{chan_idxs[-1]}"
+        pc_sel, pc_level  = _stack_perchan_bands(perchan_stats)
 
         # Per-channel individual light curve plots (original behaviour)
         if args.per_chan_lc:
@@ -897,9 +946,12 @@ def _replot(args):
                     save_path,
                     f"{gif_base}_perchan_lc_grid_{stat_tag}{chan_range_suffix}.png",
                 )
+                grid_kw = dict(noise_levels=perchan_noise, stat_idx=stat_idx)
+                if pc_sel is not None:
+                    center, blo, bhi = pc_sel(stat_idx)
+                    grid_kw.update(band_lo=blo, band_hi=bhi, center=center, level=pc_level)
                 plot_perchan_lc_grid(
-                    times_sec, perchan_lcs, freqs_mhz, titles, grid_path,
-                    noise_levels=perchan_noise, stat_idx=stat_idx,
+                    times_sec, perchan_lcs, freqs_mhz, titles, grid_path, **grid_kw
                 )
                 print(f"  Per-channel LC grid ({stat_tag}) replotted: {grid_path}")
 
@@ -911,15 +963,24 @@ def _replot(args):
                 sp = os.path.join(
                     save_path, f"{gif_base}_spectrogram_{stat_tag}{chan_range_suffix}.png"
                 )
-                plot_spectrogram(times_sec, freqs_mhz, lc_stack, titles, sp,
-                                 stat_idx=stat_idx, noise_level=noise_level)
+                spg_kw = dict(stat_idx=stat_idx, noise_level=noise_level)
+                if pc_sel is not None:
+                    center, _blo, bhi = pc_sel(stat_idx)
+                    spg_kw.update(noise_exp=float(np.nanmedian(center)),
+                                  noise_hi=float(np.nanmedian(bhi)), level=pc_level)
+                plot_spectrogram(times_sec, freqs_mhz, lc_stack, titles, sp, **spg_kw)
                 print(f"  Spectrogram ({stat_tag}) replotted: {sp}")
             for stat_idx, stat_tag in ((0, "std"), (1, "maxabs")):
                 spect_path = os.path.join(
                     save_path, f"{gif_base}_spectrum_{stat_tag}{chan_range_suffix}.png"
                 )
-                plot_spectrum(freqs_mhz, lc_stack, titles, spect_path,
-                              noise_level=noise_level, stat_idx=stat_idx)
+                spm_kw = dict(stat_idx=stat_idx, noise_level=noise_level)
+                if pc_sel is not None:
+                    center, blo, bhi = pc_sel(stat_idx)
+                    spm_kw.update(exp_freq=np.nanmedian(center, axis=1),
+                                  lo_freq=np.nanmedian(blo, axis=1),
+                                  hi_freq=np.nanmedian(bhi, axis=1), level=pc_level)
+                plot_spectrum(freqs_mhz, lc_stack, titles, spect_path, **spm_kw)
                 print(f"  Spectrum ({stat_tag}) replotted: {spect_path}")
 
     print(f"\nReplot wall time: {_time.perf_counter() - _t_start:.2f}s")
