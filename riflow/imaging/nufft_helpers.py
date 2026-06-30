@@ -241,21 +241,26 @@ def _aperture_noise_stats(
     extra_excluded: np.ndarray | None = None,
     n_controls: int = 200,
     horizon_fraction: float = 0.9,
-    quantile: float = 0.99,
+    level: float = 0.95,
     seed: int = 42,
 ) -> dict:
-    """Per-timestep image noise + a pooled-Gumbel null for aperture max|flux|.
+    """Per-timestep image noise + control-aperture nulls for the light curves.
 
     For each timestep this measures the background per-pixel std ``sigma(t)``.
     It then lays control apertures (same radius as the source apertures) over
-    the off-source background, measures ``max|flux|`` in each at every timestep,
-    normalises by ``sigma(t)``, and fits a *single* Gumbel to the pooled
-    normalised maxima. Because only ``sigma(t)`` varies in time while the shape
-    of the aperture-max distribution (set by the number of beams per aperture)
-    is stationary, pooling across time gives many samples even when only a few
-    control apertures fit in one frame. The expected aperture max and an
-    upper-quantile band then follow per-timestep as ``sigma(t) * (dimensionless
-    Gumbel statistic)``.
+    the off-source background and, at every timestep, measures both aperture
+    statistics that the light curves use -- ``max|flux|`` and ``std`` -- in each,
+    normalised by ``sigma(t)``, and pools across all timesteps and positions.
+    Because only ``sigma(t)`` varies in time while the *shape* of the
+    aperture-statistic distributions (set by the number of beams per aperture)
+    is stationary, pooling gives many samples even when only a few control
+    apertures fit in one frame.
+
+    The ``max|flux|`` null is an extreme-value statistic, so its expected value
+    and central band come from a single Gumbel fit; the ``std`` null is roughly
+    chi-distributed about ``sigma`` and uses empirical quantiles. Both bands are
+    central ``level`` intervals and scale per-timestep as ``sigma(t) *
+    (dimensionless statistic)``.
 
     Parameters
     ----------
@@ -264,12 +269,13 @@ def _aperture_noise_stats(
     extra_excluded : optional (n_pix, n_pix) bool mask of additional sky to
                      avoid (e.g. known astronomical point sources).
     n_controls     : max number of clean control apertures to use.
-    quantile       : upper band quantile (0.99 -> 99th-percentile noise max).
+    level          : central band level (0.95 -> 2.5th..97.5th percentiles).
 
     Returns
     -------
-    dict with sigma_t, exp_max_t, band_max_t (all (n_times,)), the dimensionless
-    gumbel_loc / gumbel_scale, and n_controls actually used.
+    dict with sigma_t, exp_max_t / max_lo_t / max_hi_t (max|flux| null) and
+    std_exp_t / std_lo_t / std_hi_t (std null), all (n_times,), the dimensionless
+    gumbel_loc / gumbel_scale, the band level, and n_controls actually used.
     """
     images = np.asarray(images)  # (n_times, n_pix, n_pix)
     n_times = images.shape[0]
@@ -312,48 +318,66 @@ def _aperture_noise_stats(
     cand = np.stack([cand_y.ravel(), cand_x.ravel()], axis=1)
     rng.shuffle(cand)
 
-    pooled: list[np.ndarray] = []
+    pooled_max: list[np.ndarray] = []
+    pooled_std: list[np.ndarray] = []
     n_used = 0
     safe_sigma = np.where(sigma_t > 0, sigma_t, np.nan)
     for c_y, c_x in cand:
         ry, rx = c_y + off_y, c_x + off_x
         if excluded[ry, rx].any() or not in_horizon[ry, rx].all():
             continue
-        vals = np.abs(images[:, ry, rx]).max(axis=1)  # (n_times,) aperture max
-        pooled.append(vals / safe_sigma)
+        region = images[:, ry, rx]  # (n_times, n_ap)
+        pooled_max.append(np.abs(region).max(axis=1) / safe_sigma)
+        pooled_std.append(region.std(axis=1) / safe_sigma)
         n_used += 1
         if n_used >= n_controls:
             break
 
-    samples = np.concatenate(pooled) if pooled else np.array([], dtype=float)
-    samples = samples[np.isfinite(samples)]
+    p_lo, p_hi = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
 
-    if samples.size >= 10:
+    max_s = np.concatenate(pooled_max) if pooled_max else np.array([], dtype=float)
+    max_s = max_s[np.isfinite(max_s)]
+    std_s = np.concatenate(pooled_std) if pooled_std else np.array([], dtype=float)
+    std_s = std_s[np.isfinite(std_s)]
+
+    # max|flux| null: extreme-value statistic -> single Gumbel fit.
+    if max_s.size >= 10:
         from scipy.stats import gumbel_r
 
-        loc, scale = gumbel_r.fit(samples)
-        exp_norm = loc + np.euler_gamma * scale
-        band_norm = float(gumbel_r.ppf(quantile, loc=loc, scale=scale))
-    elif samples.size > 0:
-        # Too few clean controls to fit a Gumbel — fall back to the empirical
-        # mean / quantile of whatever normalised maxima we have.
+        loc, scale = gumbel_r.fit(max_s)
+        max_exp = loc + np.euler_gamma * scale
+        max_lo, max_hi = gumbel_r.ppf([p_lo, p_hi], loc=loc, scale=scale)
+    elif max_s.size > 0:
+        # Too few clean controls to fit a Gumbel — fall back to empirical.
         loc = scale = np.nan
-        exp_norm = float(np.mean(samples))
-        band_norm = float(np.quantile(samples, quantile))
+        max_exp = float(np.mean(max_s))
+        max_lo, max_hi = np.quantile(max_s, [p_lo, p_hi])
     else:
         # No clean control apertures at all: crude white-noise extreme-value
         # guess from the aperture pixel count (overestimates N_eff because
         # dirty-image pixels are correlated, so treat as a loose upper bound).
         loc = scale = np.nan
-        exp_norm = float(np.sqrt(2.0 * np.log(max(len(off_y), 2))))
-        band_norm = exp_norm + 3.0
+        max_exp = float(np.sqrt(2.0 * np.log(max(len(off_y), 2))))
+        max_lo, max_hi = max_exp - 1.0, max_exp + 3.0
+
+    # std null: roughly chi-distributed about sigma -> empirical quantiles.
+    if std_s.size > 0:
+        std_exp = float(np.median(std_s))
+        std_lo, std_hi = np.quantile(std_s, [p_lo, p_hi])
+    else:
+        std_exp, std_lo, std_hi = 1.0, 0.8, 1.2
 
     return {
         "sigma_t": sigma_t,
-        "exp_max_t": sigma_t * exp_norm,
-        "band_max_t": sigma_t * band_norm,
+        "exp_max_t": sigma_t * max_exp,
+        "max_lo_t": sigma_t * max_lo,
+        "max_hi_t": sigma_t * max_hi,
+        "std_exp_t": sigma_t * std_exp,
+        "std_lo_t": sigma_t * std_lo,
+        "std_hi_t": sigma_t * std_hi,
         "gumbel_loc": float(loc),
         "gumbel_scale": float(scale),
+        "level": float(level),
         "n_controls": n_used,
     }
 

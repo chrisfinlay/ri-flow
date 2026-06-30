@@ -110,6 +110,10 @@ def main():
                              "the total track length (e.g. 0.1 → shift by 10%% of timesteps). "
                              "The light curve is shifted back after extraction so it aligns in "
                              "time with the original satellite track.")
+    parser.add_argument("-nbl", "--noise-band-level", type=float, default=0.95,
+                        help="Central level for the per-timestep noise bands on the "
+                             "light curves (std and max|flux|).  0.95 → 2.5..97.5 "
+                             "percentile band of the control-aperture noise null.")
     parser.add_argument("-rp", "--replot", action="store_true", default=False,
                         help="Skip MS reading and imaging entirely; regenerate the light "
                              "curve, spectrogram and spectrum plots from previously saved "
@@ -562,11 +566,9 @@ def _run(args):
             )
             noise_stats = _aperture_noise_stats(
                 images, ap_masks, n_pix, ap_radius_pix,
-                extra_excluded=extra_excluded,
+                extra_excluded=extra_excluded, level=args.noise_band_level,
             )
-            sigma_t     = noise_stats["sigma_t"]
-            exp_max_t   = noise_stats["exp_max_t"]
-            band_max_t  = noise_stats["band_max_t"]
+            sigma_t = noise_stats["sigma_t"]
             # Scalar fallback for the per-channel grid / spectrogram / spectrum
             # summary plots, which draw a single horizontal noise line.
             noise_level = float(np.nanmedian(sigma_t))
@@ -647,10 +649,15 @@ def _run(args):
                 light_curves=light_curves,
                 noise_level=np.array(noise_level),
                 sigma_t=sigma_t,
-                exp_max_t=exp_max_t,
-                band_max_t=band_max_t,
+                exp_max_t=noise_stats["exp_max_t"],
+                max_lo_t=noise_stats["max_lo_t"],
+                max_hi_t=noise_stats["max_hi_t"],
+                std_exp_t=noise_stats["std_exp_t"],
+                std_lo_t=noise_stats["std_lo_t"],
+                std_hi_t=noise_stats["std_hi_t"],
                 gumbel_loc=np.array(noise_stats["gumbel_loc"]),
                 gumbel_scale=np.array(noise_stats["gumbel_scale"]),
+                band_level=np.array(noise_stats["level"]),
                 times_sec=times_sec,
                 titles=np.array(titles),
                 chan_freq_mhz=chan_freqs[run_chans] / 1e6,
@@ -661,7 +668,10 @@ def _run(args):
                     times_sec, light_curves, titles,
                     os.path.join(save_path, f"{run_gif_name}.png"),
                     noise_level=noise_level, sigma_t=sigma_t,
-                    exp_max=exp_max_t, band_max=band_max_t,
+                    exp_max=noise_stats["exp_max_t"],
+                    max_lo=noise_stats["max_lo_t"], max_hi=noise_stats["max_hi_t"],
+                    std_lo=noise_stats["std_lo_t"], std_hi=noise_stats["std_hi_t"],
+                    level=float(noise_stats["level"]),
                 )
             if mode == "perchan":
                 perchan_lcs.append(light_curves)
@@ -747,6 +757,20 @@ def _run(args):
 # Replot — regenerate plots from saved lc_data/*.npz, no MS / imaging needed
 # ---------------------------------------------------------------------------
 
+def _lc_noise_kwargs(d) -> dict:
+    """plot_light_curves noise-band kwargs from a light-curve npz, taking only
+    the keys present (older npz files predate the per-timestep noise nulls)."""
+    keymap = {
+        "sigma_t": "sigma_t", "exp_max": "exp_max_t",
+        "max_lo": "max_lo_t", "max_hi": "max_hi_t",
+        "std_lo": "std_lo_t", "std_hi": "std_hi_t",
+    }
+    kw = {arg: d[key] for arg, key in keymap.items() if key in d}
+    if "band_level" in d:
+        kw["level"] = float(d["band_level"])
+    return kw
+
+
 def _replot(args):
     import time as _time
     _t_start = _time.perf_counter()
@@ -808,9 +832,7 @@ def _replot(args):
                 plot_light_curves(
                     d["times_sec"], d["light_curves"], titles, out,
                     noise_level=float(d["noise_level"]),
-                    sigma_t=d["sigma_t"] if "sigma_t" in d else None,
-                    exp_max=d["exp_max_t"] if "exp_max_t" in d else None,
-                    band_max=d["band_max_t"] if "band_max_t" in d else None,
+                    **_lc_noise_kwargs(d),
                 )
                 print(f"  Light curve replotted: {out}")
             continue
@@ -854,9 +876,7 @@ def _replot(args):
                 out          = os.path.join(save_path, f"{run_gif_name}.png")
                 plot_light_curves(
                     times_sec, lc, titles, out, noise_level=nl,
-                    sigma_t=d["sigma_t"] if "sigma_t" in d else None,
-                    exp_max=d["exp_max_t"] if "exp_max_t" in d else None,
-                    band_max=d["band_max_t"] if "band_max_t" in d else None,
+                    **_lc_noise_kwargs(d),
                 )
                 print(f"  Light curve replotted: {out}")
         # Per-channel light curve grid (default)

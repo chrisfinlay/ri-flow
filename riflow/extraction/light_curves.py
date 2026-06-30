@@ -289,20 +289,28 @@ def plot_light_curves(
     noise_level: float | None = None,
     sigma_t: np.ndarray | None = None,
     exp_max: np.ndarray | None = None,
-    band_max: np.ndarray | None = None,
+    max_lo: np.ndarray | None = None,
+    max_hi: np.ndarray | None = None,
+    std_lo: np.ndarray | None = None,
+    std_hi: np.ndarray | None = None,
+    level: float = 0.95,
 ):
-    """Plot per-source std / max|flux| light curves with noise expectations.
+    """Plot per-source std / max|flux| light curves with noise nulls.
 
-    sigma_t  : (n_times,) per-timestep image noise sigma(t); drawn as a curve to
-               compare against the `std` light curve. Falls back to a flat line
-               at `noise_level` when not given.
-    exp_max  : (n_times,) expected aperture max|flux| of pure noise (the Gumbel
-               mean), drawn to compare against the `max|flux|` light curve.
-    band_max : (n_times,) upper-quantile aperture max|flux| of pure noise; shaded
-               band between exp_max and band_max marks the noise-consistent zone.
+    sigma_t        : (n_times,) per-timestep image noise sigma(t); drawn as a
+                     curve to compare against the `std` light curve. Falls back
+                     to a flat line at `noise_level` when not given.
+    exp_max        : (n_times,) expected aperture max|flux| of pure noise (Gumbel
+                     mean), drawn to compare against the `max|flux|` curve.
+    max_lo, max_hi : (n_times,) central `level` band of the noise max|flux|;
+                     `max|flux|` above max_hi is a candidate residual.
+    std_lo, std_hi : (n_times,) central `level` band of the noise aperture std;
+                     marks the noise-consistent deviation around sigma(t).
+    level          : band level for the legend label (0.95 -> "95%").
     """
     plt.rcParams["font.size"] = 16
     n_curves = len(titles)
+    pct = int(round(level * 100))
 
     # squeeze=False keeps `ax` a 2-D array even when n_curves == 1, so a single
     # source (e.g. Fornax A only) doesn't break subscripting.
@@ -310,8 +318,11 @@ def plot_light_curves(
                            squeeze=False)
 
     for i in range(n_curves):
-        ax[i, 0].plot(times, light_curves[i, :, 0], label="std")
+        std_line, = ax[i, 0].plot(times, light_curves[i, :, 0], label="std")
         ax[i, 0].plot(times, light_curves[i, :, 1], label="max|flux|")
+        if std_lo is not None and std_hi is not None:
+            ax[i, 0].fill_between(times, std_lo, std_hi, color=std_line.get_color(),
+                                  alpha=0.15, linewidth=0, label=f"std noise {pct}%")
         if sigma_t is not None:
             ax[i, 0].plot(times, sigma_t, color="gray", linewidth=1.2,
                           linestyle="--", alpha=0.8, label=r"image noise $\sigma(t)$")
@@ -321,9 +332,9 @@ def plot_light_curves(
         if exp_max is not None:
             ax[i, 0].plot(times, exp_max, color="firebrick", linewidth=1.2,
                           linestyle="--", alpha=0.9, label="E[max|flux|] noise")
-            if band_max is not None:
-                ax[i, 0].fill_between(times, exp_max, band_max, color="firebrick",
-                                      alpha=0.15, linewidth=0, label="noise 99% band")
+        if max_lo is not None and max_hi is not None:
+            ax[i, 0].fill_between(times, max_lo, max_hi, color="firebrick",
+                                  alpha=0.15, linewidth=0, label=f"max noise {pct}%")
         ax[i, 0].legend()
         ax[i, 0].set_title(titles[i])
         ax[i, 0].set_ylabel("Flux [Jy/bm]")
