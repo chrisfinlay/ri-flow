@@ -233,6 +233,131 @@ def _estimate_noise_level(
     return float(pixel_vals.std())
 
 
+def _aperture_noise_stats(
+    images: list,
+    ap_masks: list,
+    n_pix: int,
+    aperture_radius_pix: float,
+    extra_excluded: np.ndarray | None = None,
+    n_controls: int = 200,
+    horizon_fraction: float = 0.9,
+    quantile: float = 0.99,
+    seed: int = 42,
+) -> dict:
+    """Per-timestep image noise + a pooled-Gumbel null for aperture max|flux|.
+
+    For each timestep this measures the background per-pixel std ``sigma(t)``.
+    It then lays control apertures (same radius as the source apertures) over
+    the off-source background, measures ``max|flux|`` in each at every timestep,
+    normalises by ``sigma(t)``, and fits a *single* Gumbel to the pooled
+    normalised maxima. Because only ``sigma(t)`` varies in time while the shape
+    of the aperture-max distribution (set by the number of beams per aperture)
+    is stationary, pooling across time gives many samples even when only a few
+    control apertures fit in one frame. The expected aperture max and an
+    upper-quantile band then follow per-timestep as ``sigma(t) * (dimensionless
+    Gumbel statistic)``.
+
+    Parameters
+    ----------
+    ap_masks       : per-source list of per-time ``np.where`` index tuples (the
+                     source apertures, excluded from the background).
+    extra_excluded : optional (n_pix, n_pix) bool mask of additional sky to
+                     avoid (e.g. known astronomical point sources).
+    n_controls     : max number of clean control apertures to use.
+    quantile       : upper band quantile (0.99 -> 99th-percentile noise max).
+
+    Returns
+    -------
+    dict with sigma_t, exp_max_t, band_max_t (all (n_times,)), the dimensionless
+    gumbel_loc / gumbel_scale, and n_controls actually used.
+    """
+    images = np.asarray(images)  # (n_times, n_pix, n_pix)
+    n_times = images.shape[0]
+
+    # Union of all source apertures (+ any extra avoid regions) to exclude.
+    excluded = np.zeros((n_pix, n_pix), dtype=bool)
+    for s_masks in ap_masks:
+        for mask in s_masks:
+            excluded[mask] = True
+    if extra_excluded is not None:
+        excluded |= extra_excluded
+
+    # Circular horizon mask centred on the image.
+    cy = cx = n_pix / 2.0
+    radius = horizon_fraction * n_pix / 2.0
+    yy, xx = np.mgrid[0:n_pix, 0:n_pix]
+    in_horizon = (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
+    background = in_horizon & ~excluded
+
+    # Per-timestep background std sigma(t).
+    bg_rows, bg_cols = np.where(background)
+    if len(bg_rows) == 0:
+        sigma_t = images.reshape(n_times, -1).std(axis=1)
+    else:
+        sigma_t = images[:, bg_rows, bg_cols].std(axis=1)
+    sigma_t = sigma_t.astype(float)
+
+    # Control-aperture offset template (a disc of the source aperture radius).
+    R = int(np.ceil(aperture_radius_pix))
+    dy, dx = np.mgrid[-R:R + 1, -R:R + 1]
+    in_disc = dx ** 2 + dy ** 2 <= aperture_radius_pix ** 2
+    off_y, off_x = dy[in_disc], dx[in_disc]
+
+    # Candidate centres on a grid spaced ~ one aperture radius, then shuffled,
+    # keeping only those whose full disc is inside the horizon and clear of any
+    # source / avoid region.
+    rng = np.random.default_rng(seed)
+    step = max(1, int(round(aperture_radius_pix)))
+    cand_y, cand_x = np.mgrid[R:n_pix - R:step, R:n_pix - R:step]
+    cand = np.stack([cand_y.ravel(), cand_x.ravel()], axis=1)
+    rng.shuffle(cand)
+
+    pooled: list[np.ndarray] = []
+    n_used = 0
+    safe_sigma = np.where(sigma_t > 0, sigma_t, np.nan)
+    for c_y, c_x in cand:
+        ry, rx = c_y + off_y, c_x + off_x
+        if excluded[ry, rx].any() or not in_horizon[ry, rx].all():
+            continue
+        vals = np.abs(images[:, ry, rx]).max(axis=1)  # (n_times,) aperture max
+        pooled.append(vals / safe_sigma)
+        n_used += 1
+        if n_used >= n_controls:
+            break
+
+    samples = np.concatenate(pooled) if pooled else np.array([], dtype=float)
+    samples = samples[np.isfinite(samples)]
+
+    if samples.size >= 10:
+        from scipy.stats import gumbel_r
+
+        loc, scale = gumbel_r.fit(samples)
+        exp_norm = loc + np.euler_gamma * scale
+        band_norm = float(gumbel_r.ppf(quantile, loc=loc, scale=scale))
+    elif samples.size > 0:
+        # Too few clean controls to fit a Gumbel — fall back to the empirical
+        # mean / quantile of whatever normalised maxima we have.
+        loc = scale = np.nan
+        exp_norm = float(np.mean(samples))
+        band_norm = float(np.quantile(samples, quantile))
+    else:
+        # No clean control apertures at all: crude white-noise extreme-value
+        # guess from the aperture pixel count (overestimates N_eff because
+        # dirty-image pixels are correlated, so treat as a loose upper bound).
+        loc = scale = np.nan
+        exp_norm = float(np.sqrt(2.0 * np.log(max(len(off_y), 2))))
+        band_norm = exp_norm + 3.0
+
+    return {
+        "sigma_t": sigma_t,
+        "exp_max_t": sigma_t * exp_norm,
+        "band_max_t": sigma_t * band_norm,
+        "gumbel_loc": float(loc),
+        "gumbel_scale": float(scale),
+        "n_controls": n_used,
+    }
+
+
 def _make_frame_setup(wcs: WCS, vmin: float, vmax: float):
     """Create reusable figure/axes with WCS projection."""
     fig = plt.figure(figsize=(5, 5))
